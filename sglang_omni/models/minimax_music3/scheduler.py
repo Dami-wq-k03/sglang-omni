@@ -15,6 +15,7 @@ from sglang_omni.models.minimax_music3.sglang_request_builder import (
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 
+from .serial_offload import get_coordinator
 
 class MiniMaxMusic3Scheduler(OmniScheduler["MiniMaxMusic3SGLangRequestData"]):
     """Admit, decode and retire every request as a CFG row pair."""
@@ -83,6 +84,8 @@ class MiniMaxMusic3Scheduler(OmniScheduler["MiniMaxMusic3SGLangRequestData"]):
         self, queue: list[Req], running_batch: ScheduleBatch
     ) -> int:
         """How many leading queue entries the adder may see, always whole pairs."""
+        if not get_coordinator().ar_can_admit():
+            return 0
         allocatable = int(self.get_num_allocatable_reqs(len(running_batch.reqs)))
         limit = min(len(queue), max(0, allocatable))
         limit -= limit % 2

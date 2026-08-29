@@ -80,12 +80,15 @@ class MiniMaxMusic3EngineBuilder(TtsEngineBuilder["MiniMaxMusic3SGLangRequestDat
     context_length = 10240
     model_arch_override = "Qwen3ForCausalLM"
 
-    def __init__(self, *, max_running_requests: int = 16) -> None:
+    def __init__(
+        self, *, max_running_requests: int = 16, enable_serial_offload: bool = False
+    ) -> None:
         self.max_running_requests = int(max_running_requests)
         if self.max_running_requests <= 0:
             raise ValueError("MiniMax Music 3 max_running_requests must be positive")
         else:
             pass
+        self._enable_serial_offload = bool(enable_serial_offload)
         self.model_runner: MiniMaxMusic3ModelRunner | None = None
         self.checkpoint_root: str | None = None
 
@@ -177,10 +180,15 @@ class MiniMaxMusic3EngineBuilder(TtsEngineBuilder["MiniMaxMusic3SGLangRequestDat
         *,
         generation_cuda_graph_enabled: bool,
     ) -> None:
-        del generation_cuda_graph_enabled
+        del generation_cuda_graph_enabled, server_args
+        if self._enable_serial_offload:
+            logger.info(
+                "MiniMax Music 3 serial offload: skipping RVQ depth CUDA "
+                "graph capture"
+            )
+            return
         from .sglang_model import enable_rvq_depth_cuda_graph
 
-        del server_args
         enable_rvq_depth_cuda_graph(model, rvq_graph_buckets(self.max_running_requests))
 
     def make_scheduler(
