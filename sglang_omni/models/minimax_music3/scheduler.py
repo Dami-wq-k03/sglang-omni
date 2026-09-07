@@ -84,8 +84,6 @@ class MiniMaxMusic3Scheduler(OmniScheduler["MiniMaxMusic3SGLangRequestData"]):
         self, queue: list[Req], running_batch: ScheduleBatch
     ) -> int:
         """How many leading queue entries the adder may see, always whole pairs."""
-        if not get_coordinator().ar_can_admit():
-            return 0
         allocatable = int(self.get_num_allocatable_reqs(len(running_batch.reqs)))
         limit = min(len(queue), max(0, allocatable))
         limit -= limit % 2
@@ -96,10 +94,16 @@ class MiniMaxMusic3Scheduler(OmniScheduler["MiniMaxMusic3SGLangRequestData"]):
                 queue[index + 1].origin_input_ids
             )
             if index and tokens + pair_tokens > budget:
-                return index
+                limit = index
+                break
             else:
                 pass
             tokens += pair_tokens
+        coordinator = get_coordinator()
+        if coordinator.enabled:
+            if limit < 2 or not coordinator.try_acquire_ar(queue[0].rid):
+                return 0
+            return 2
         return limit
 
     def stream_output(

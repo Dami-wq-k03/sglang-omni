@@ -264,7 +264,7 @@ class MiniMaxMusic3AcousticDecoder:
         if self._residency is not None:
             self._residency.wake()
 
-    def offload_to_cpu(self) -> None:
+    def release_residency(self) -> None:
         """Drop the DIT/DAV GPU replica; a no-op once already offloaded."""
         if self._residency is not None:
             self._residency.sleep()
@@ -458,6 +458,7 @@ class MiniMaxMusic3AcousticScheduler(StreamingSimpleScheduler):
         else:
             pass
         hidden = item.data[0]
+        get_coordinator().require_acoustic(request_id)
         state = self.stream_states.setdefault(request_id, AcousticStreamState())
         metadata = item.metadata
         if not isinstance(metadata, dict):
@@ -580,9 +581,12 @@ class MiniMaxMusic3AcousticScheduler(StreamingSimpleScheduler):
             state.last_condition = None
         else:
             pass
-        if self.decoder.serial_offload:
-            self.decoder.offload_to_cpu()
-            get_coordinator().end_dit_handoff(request_id)
+        if getattr(self.decoder, "serial_offload", False):
+            coordinator = get_coordinator()
+            coordinator.end_dit_handoff(
+                request_id,
+                release_acoustic=self.decoder.release_residency,
+            )
         else:
             pass
 

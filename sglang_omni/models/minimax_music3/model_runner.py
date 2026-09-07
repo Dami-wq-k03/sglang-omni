@@ -274,6 +274,7 @@ class MiniMaxMusic3ModelRunner(ModelRunner["MiniMaxMusic3SGLangRequestData"]):
             data.ar_state = None
         else:
             pass
+        self._serial_offload.cancel_ar(request_id)
 
     def advance(
         self,
