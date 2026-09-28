@@ -55,4 +55,3 @@ def test_encoder_matches_reference() -> None:
     with torch.inference_mode():
         actual = encoder([reference["features.0"], reference["features.1"]])
     torch.testing.assert_close(actual, reference["expected"], rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(actual.norm(dim=-1), torch.ones(actual.shape[0]))

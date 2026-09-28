@@ -60,20 +60,20 @@ def test_cuda_graph_matches_eager_across_requests(talker: Ming3Talker) -> None:
             embeddings = torch.randn(
                 1, prompt_tokens, 32, device="cuda", dtype=torch.bfloat16
             )
-            reference = torch.randn(
+            reference_latents = torch.randn(
                 1, reference_frames, 4, device="cuda", dtype=torch.bfloat16
             )
             talker.enable_cuda_graph = False
             expected = talker.generate_latents(
                 embeddings,
-                reference,
+                reference_latents,
                 6,
                 torch.Generator(device="cuda").manual_seed(seed),
             )
             talker.enable_cuda_graph = True
             actual = talker.generate_latents(
                 embeddings,
-                reference,
+                reference_latents,
                 6,
                 torch.Generator(device="cuda").manual_seed(seed),
             )
