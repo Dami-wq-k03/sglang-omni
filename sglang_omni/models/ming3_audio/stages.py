@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from sglang_omni.models.ming3_audio.preprocessing import (
     AudioPipelineState,
     Ming3AudioPreprocessor,
 )
+from sglang_omni.models.ming3_audio.talker import Ming3SpeechGenerator
 from sglang_omni.models.ming3_audio.thinker import (
     Ming3AudioModelRunner,
     Ming3AudioThinker,
@@ -35,7 +37,87 @@ from sglang_omni.scheduling.sglang_backend.server_args_builder import (
     build_sglang_server_args,
 )
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.utils.audio import decode_audio_data_uri
+from sglang_omni.utils.audio_payload import audio_waveform_payload
 from sglang_omni.utils.device import resolve_concrete_device
+
+
+def route_preprocessing(request_id: str, output: StagePayload) -> str:
+    """Select TTS or understanding; request_id follows the routing interface."""
+    return "talker" if output.request.metadata.get("task") == "tts" else "audio_encoder"
+
+
+def route_thinker(request_id: str, output: StagePayload) -> str:
+    """Select the output modality; request_id follows the routing interface."""
+    return (
+        "talker"
+        if "audio" in output.request.metadata.get("output_modalities", [])
+        else "decode"
+    )
+
+
+def create_decode_executor(model_path: str) -> SimpleScheduler:
+    """Publish thinker text; model_path follows the stage factory interface."""
+
+    def decode(payload: StagePayload) -> StagePayload:
+        return payload
+
+    return SimpleScheduler(decode)
+
+
+def create_talker_executor(
+    model_path: str,
+    *,
+    max_decode_steps: int,
+    seed: int,
+    device: str | None = None,
+    gpu_id: int | None = None,
+) -> SimpleScheduler:
+    speech = Ming3SpeechGenerator(
+        model_path, resolve_concrete_device(device, gpu_id), max_decode_steps
+    )
+
+    def synthesize(payload: StagePayload) -> StagePayload:
+        parameters = payload.request.metadata.get(
+            "tts_params", payload.request.metadata.get("audio_config", {})
+        )
+        reference = parameters.get("ref_audio")
+        reference_text = parameters.get("ref_text", "")
+        inputs = payload.request.inputs
+        if isinstance(inputs, dict) and inputs.get("references"):
+            descriptor = inputs["references"][0]
+            reference = descriptor
+            reference_text = descriptor.get("text", reference_text)
+        else:
+            pass
+        if isinstance(reference, dict):
+            if "data" in reference:
+                reference_audio = base64.b64decode(reference["data"], validate=True)
+            else:
+                reference_audio = Path(reference["audio_path"]).read_bytes()
+        elif isinstance(reference, str):
+            reference_audio = decode_audio_data_uri(reference)
+            if reference_audio is None:
+                reference_audio = Path(reference).read_bytes()
+            else:
+                pass
+        elif isinstance(reference, bytes):
+            reference_audio = reference
+        else:
+            reference_audio = None
+        request_seed = parameters.get("seed", payload.request.params.get("seed"))
+        waveform = speech.synthesize(
+            payload.data["text"],
+            reference_audio,
+            reference_text,
+            seed if request_seed is None else request_seed,
+        )
+        payload.data.update(
+            audio_waveform_payload(waveform, sample_rate=speech.sample_rate)
+        )
+        return payload
+
+    return SimpleScheduler(synthesize)
 
 
 def create_preprocessing_executor(model_path: str) -> SimpleScheduler:
@@ -90,7 +172,9 @@ def create_thinker_executor(
     overrides.update(
         tp_size=tp_size,
         trust_remote_code=False,
-        json_model_override_args=json.dumps({"architectures": ["BailingMoeV3ForCausalLM"]}),
+        json_model_override_args=json.dumps(
+            {"architectures": ["BailingMoeV3ForCausalLM"]}
+        ),
         disable_radix_cache=True,
         chunked_prefill_size=-1,
     )

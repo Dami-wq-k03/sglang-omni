@@ -25,7 +25,8 @@ def default_stages() -> list[StageConfig]:
             name="preprocessing",
             process="preprocessing",
             factory_path=f"{PACKAGE}.stages.create_preprocessing_executor",
-            next="audio_encoder",
+            next=["audio_encoder", "talker"],
+            route_fn=f"{PACKAGE}.stages.route_preprocessing",
         ),
         StageConfig(
             name="audio_encoder",
@@ -47,6 +48,21 @@ def default_stages() -> list[StageConfig]:
                 disable_cuda_graph=True,
                 enable_torch_compile=False,
             ),
+            next=["decode", "talker"],
+            route_fn=f"{PACKAGE}.stages.route_thinker",
+        ),
+        StageConfig(
+            name="decode",
+            process="preprocessing",
+            factory_path=f"{PACKAGE}.stages.create_decode_executor",
+            terminal=True,
+        ),
+        StageConfig(
+            name="talker",
+            process="talker",
+            gpu=1,
+            factory_path=f"{PACKAGE}.stages.create_talker_executor",
+            factory=FactoryArgs(max_decode_steps=512, seed=123),
             terminal=True,
         ),
     ]

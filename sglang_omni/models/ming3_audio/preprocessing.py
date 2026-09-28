@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -10,22 +11,54 @@ from typing import Literal, TypedDict
 import numpy as np
 import numpy.typing as npt
 import torch
+import torchaudio
 import whisper
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from sglang_omni.models.ming3_audio.audio_encoder import AudioEncoderConfig
-from sglang_omni.preprocessing.audio import AudioMediaIO, ensure_audio_list_async
+from sglang_omni.preprocessing.audio import decode_audio_bytes_av, parse_wav_bytes
+from sglang_omni.preprocessing.base import MediaIO, is_url
+from sglang_omni.preprocessing.resource_connector import get_global_resource_connector
 from sglang_omni.proto.request import StagePayload
 
 AUDIO_PLACEHOLDER = "<|audio_pad|>"
 ASR_PROMPT = "Please transcribe the speech into text. Only output the transcription."
 
 
+class InputAudio(BaseModel):
+    data: str
+    format: str
+
+
+class AudioURL(BaseModel):
+    url: str
+
+
 class ContentPart(BaseModel):
-    type: Literal["text", "audio"]
+    type: Literal["text", "audio", "input_audio", "audio_url"]
     text: str = ""
     audio: str | None = None
+    input_audio: InputAudio | None = None
+    audio_url: AudioURL | None = None
+
+
+class AudioMediaIO(MediaIO[torch.Tensor]):
+    def load_bytes(self, data: bytes) -> torch.Tensor:
+        try:
+            waveform, sample_rate = parse_wav_bytes(data)
+        except ValueError:
+            waveform, sample_rate = decode_audio_bytes_av(data)
+        return torchaudio.functional.resample(
+            torch.from_numpy(waveform), sample_rate, whisper.audio.SAMPLE_RATE
+        )
+
+    def load_base64(self, media_type: str, data: str) -> torch.Tensor:
+        """Decode audio; media_type belongs to the MediaIO interface."""
+        return self.load_bytes(base64.b64decode(data, validate=True))
+
+    def load_file(self, filepath: Path) -> torch.Tensor:
+        return self.load_bytes(filepath.read_bytes())
 
 
 class ChatMessage(BaseModel):
@@ -37,7 +70,9 @@ class AudioChatInputs(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     messages: list[ChatMessage] = Field(default_factory=list)
-    audio: list[str | npt.NDArray[np.float32]] = Field(default_factory=list)
+    audio: list[str | npt.NDArray[np.float32]] = Field(
+        default_factory=list, validation_alias=AliasChoices("audio", "audios")
+    )
     audio_bytes: bytes | None = None
 
 
@@ -61,10 +96,19 @@ class Ming3AudioPreprocessor:
         self.audio_token_id: int = configuration["audio_token_id"]
 
     async def __call__(self, payload: StagePayload) -> StagePayload:
-        inputs = AudioChatInputs.model_validate(payload.request.inputs)
+        raw_inputs = payload.request.inputs
+        if payload.request.metadata.get("task") == "tts":
+            if isinstance(raw_inputs, str):
+                payload.data = {"text": raw_inputs}
+            else:
+                payload.data = {"text": raw_inputs["text"]}
+            return payload
+        elif isinstance(raw_inputs, list):
+            inputs = AudioChatInputs(messages=raw_inputs)
+        else:
+            inputs = AudioChatInputs.model_validate(raw_inputs)
         if inputs.audio_bytes is not None:
-            waveform, _ = AudioMediaIO(target_sr=16000).load_bytes(inputs.audio_bytes)
-            waveforms = [waveform]
+            waveforms = [AudioMediaIO().load_bytes(inputs.audio_bytes)]
             messages = [
                 ChatMessage(
                     role="user",
@@ -79,14 +123,35 @@ class Ming3AudioPreprocessor:
             sources = list(inputs.audio)
             for message in messages:
                 if isinstance(message.content, list):
-                    sources.extend(
-                        part.audio
-                        for part in message.content
-                        if part.type == "audio" and part.audio is not None
-                    )
+                    for part in message.content:
+                        if part.type == "input_audio":
+                            assert part.input_audio is not None
+                            audio = part.input_audio
+                            sources.append(
+                                f"data:audio/{audio.format};base64,{audio.data}"
+                            )
+                            part.type = "audio"
+                        elif part.type == "audio_url":
+                            assert part.audio_url is not None
+                            sources.append(part.audio_url.url)
+                            part.type = "audio"
+                        elif part.type == "audio" and part.audio is not None:
+                            sources.append(part.audio)
+                        else:
+                            pass
                 else:
                     pass
-            waveforms = await ensure_audio_list_async(sources, target_sr=16000)
+            waveforms: list[torch.Tensor] = []
+            connector = get_global_resource_connector()
+            media_io = AudioMediaIO()
+            for source in sources:
+                if isinstance(source, np.ndarray):
+                    waveform = torch.from_numpy(source)
+                elif is_url(source):
+                    waveform = await connector.load_resource_async(source, media_io)
+                else:
+                    waveform = media_io.load_file(Path(source))
+                waveforms.append(waveform)
 
         features = [
             whisper.log_mel_spectrogram(

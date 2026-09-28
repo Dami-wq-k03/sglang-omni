@@ -27,7 +27,9 @@ class Ming3AudioThinker(BailingMoeV3ForCausalLM):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor | None = None,
         pp_proxy_tensors: PPProxyTensors | None = None,
+        omni_prefill_rids: list[str] | None = None,
     ) -> LogitsProcessorOutput | PPProxyTensors:
+        """Adapt prefill embeddings; omni_prefill_rids belongs to Omni's interface."""
         return super().forward(
             input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
         )

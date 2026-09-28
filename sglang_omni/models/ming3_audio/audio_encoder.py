@@ -94,9 +94,11 @@ class Ming3AudioEncoder(nn.Module):
         self.linear_proj_audio = nn.Sequential(*modules)
 
     def load_checkpoint(self, model_path: str) -> None:
-        self.audio.load_state_dict(load_weights_by_prefix(model_path, "model.audio."))
+        self.audio.load_state_dict(
+            load_weights_by_prefix(model_path, prefix="model.audio.")
+        )
         self.linear_proj_audio.load_state_dict(
-            load_weights_by_prefix(model_path, "linear_proj_audio.")
+            load_weights_by_prefix(model_path, prefix="linear_proj_audio.")
         )
 
     def forward(self, features: list[torch.Tensor]) -> torch.Tensor:
