@@ -12,7 +12,8 @@ from pydantic import JsonValue
 from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.models.registry import ModelRegistry
 from sglang.srt.sampling.sampling_params import SamplingParams
-from transformers import AutoConfig, AutoTokenizer
+from sglang.srt.utils.hf_transformers.tokenizer import get_tokenizer
+from transformers import AutoConfig
 
 from sglang_omni.models.ming3_audio.audio_encoder import (
     AudioEncoderConfig,
@@ -190,7 +191,7 @@ def create_thinker_executor(
             total_gpu_memory_fraction=total_gpu_memory_fraction,
         )
     )
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
+    tokenizer = get_tokenizer(model_path, trust_remote_code=False)
 
     def build_request(payload: StagePayload) -> SGLangARRequestData:
         state: AudioPipelineState = payload.data
