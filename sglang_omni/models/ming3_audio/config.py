@@ -26,7 +26,7 @@ def default_stages() -> list[StageConfig]:
             process="preprocessing",
             factory_path=f"{PACKAGE}.stages.create_preprocessing_executor",
             next=["audio_encoder", "talker"],
-            route_fn=f"{PACKAGE}.stages.route_preprocessing",
+            route_fn=f"{PACKAGE}.routing.route_preprocessing",
         ),
         StageConfig(
             name="audio_encoder",
@@ -49,7 +49,7 @@ def default_stages() -> list[StageConfig]:
                 enable_torch_compile=False,
             ),
             next=["decode", "talker"],
-            route_fn=f"{PACKAGE}.stages.route_thinker",
+            route_fn=f"{PACKAGE}.routing.route_thinker",
         ),
         StageConfig(
             name="decode",

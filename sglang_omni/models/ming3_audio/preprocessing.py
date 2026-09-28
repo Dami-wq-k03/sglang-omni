@@ -23,10 +23,20 @@ from sglang_omni.preprocessing.resource_connector import get_global_resource_con
 from sglang_omni.proto.request import StagePayload
 
 AUDIO_PLACEHOLDER = "<|audio_pad|>"
+ASR_LANGUAGE_SEPARATOR = "\t"
 ASR_PROMPT = (
     "Please recognize the language of this speech and transcribe it with appropriate "
     "punctuation marks, placing a `\t` between the identified language and the transcribe."
 )
+
+
+def separate_asr_language_prefix(transcript: str) -> str:
+    """Drop the language tag the ASR prompt asks the model to emit."""
+    separator_index = transcript.find(ASR_LANGUAGE_SEPARATOR)
+    if separator_index >= 0:
+        return transcript[separator_index + 1 :]
+    else:
+        return transcript
 
 
 class InputAudio(BaseModel):

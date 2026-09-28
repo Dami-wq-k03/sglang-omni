@@ -23,6 +23,7 @@ from sglang_omni.models.ming3_audio.hf_config import Ming3AudioConfig
 from sglang_omni.models.ming3_audio.preprocessing import (
     AudioPipelineState,
     Ming3AudioPreprocessor,
+    separate_asr_language_prefix,
 )
 from sglang_omni.models.ming3_audio.talker import Ming3SpeechGenerator
 from sglang_omni.models.ming3_audio.thinker import (
@@ -41,20 +42,6 @@ from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.utils.audio import decode_audio_data_uri
 from sglang_omni.utils.audio_payload import audio_waveform_payload
 from sglang_omni.utils.device import resolve_concrete_device
-
-
-def route_preprocessing(request_id: str, output: StagePayload) -> str:
-    """Select TTS or understanding; request_id follows the routing interface."""
-    return "talker" if output.request.metadata.get("task") == "tts" else "audio_encoder"
-
-
-def route_thinker(request_id: str, output: StagePayload) -> str:
-    """Select the output modality; request_id follows the routing interface."""
-    return (
-        "talker"
-        if "audio" in output.request.metadata.get("output_modalities", [])
-        else "decode"
-    )
 
 
 def create_decode_executor(model_path: str) -> SimpleScheduler:
@@ -236,9 +223,7 @@ def create_thinker_executor(
         payload = request.stage_payload
         text = tokenizer.decode(request.output_ids, skip_special_tokens=True).strip()
         if payload.request.metadata.get("task") == "asr":
-            # note (Codex): ASR generation prefixes the transcript with language and a tab.
-            _, separator, transcript = text.partition("\t")
-            text = transcript if separator else text
+            text = separate_asr_language_prefix(text)
         else:
             pass
         payload.data = {

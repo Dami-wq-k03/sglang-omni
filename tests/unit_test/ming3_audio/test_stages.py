@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stage routing for speech synthesis and audio understanding."""
 
-from sglang_omni.models.ming3_audio.stages import route_preprocessing, route_thinker
+from sglang_omni.models.ming3_audio.routing import route_preprocessing, route_thinker
 from sglang_omni.proto.request import OmniRequest, StagePayload
 
 

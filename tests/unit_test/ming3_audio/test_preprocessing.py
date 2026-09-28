@@ -12,7 +12,10 @@ import soundfile
 import torch
 from whisper.audio import SAMPLE_RATE as WHISPER_SAMPLE_RATE
 
-from sglang_omni.models.ming3_audio.preprocessing import AudioMediaIO
+from sglang_omni.models.ming3_audio.preprocessing import (
+    AudioMediaIO,
+    separate_asr_language_prefix,
+)
 
 STEREO_FRAME = np.array([[0.5, -0.25]], dtype=np.float32)
 STEREO_FRAME_COUNT = 1600
@@ -55,6 +58,20 @@ def test_base64_and_file_loaders_match_wav_bytes(tmp_path: Path) -> None:
     decoded_file = media_io.load_file(wav_path)
     torch.testing.assert_close(decoded_base64, expected, rtol=0, atol=0)
     torch.testing.assert_close(decoded_file, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("transcript", "recognized_text"),
+    [
+        ("English\thello there", "hello there"),
+        ("hello there", "hello there"),
+        ("English\t", ""),
+    ],
+)
+def test_asr_transcript_drops_language_prefix(
+    transcript: str, recognized_text: str
+) -> None:
+    assert separate_asr_language_prefix(transcript) == recognized_text
 
 
 def test_resampling_preserves_tone_frequency_and_level() -> None:
