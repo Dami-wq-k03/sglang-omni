@@ -62,7 +62,9 @@ def default_stages() -> list[StageConfig]:
             process="talker",
             gpu=1,
             factory_path=f"{PACKAGE}.stages.create_talker_executor",
-            factory=FactoryArgs(max_decode_steps=512, seed=123),
+            factory=FactoryArgs(
+                max_decode_steps=512, seed=123, enable_cuda_graph=False
+            ),
             next="decode",
         ),
     ]

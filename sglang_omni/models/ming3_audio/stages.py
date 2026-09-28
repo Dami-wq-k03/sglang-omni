@@ -71,11 +71,15 @@ def create_talker_executor(
     *,
     max_decode_steps: int,
     seed: int,
+    enable_cuda_graph: bool,
     device: str | None = None,
     gpu_id: int | None = None,
 ) -> SimpleScheduler:
     speech = Ming3SpeechGenerator(
-        model_path, resolve_concrete_device(device, gpu_id), max_decode_steps
+        model_path,
+        resolve_concrete_device(device, gpu_id),
+        max_decode_steps,
+        enable_cuda_graph,
     )
 
     def synthesize(payload: StagePayload) -> StagePayload:

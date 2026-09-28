@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import onnxruntime
@@ -33,6 +34,21 @@ from sglang_omni.utils.audio_features import cached_fbank
 TTS_PROMPT = "Please generate speech based on the following description.\n"
 MINIMUM_DECODE_STEPS = 3
 SPEAKER_SAMPLE_RATE = 16000
+GRAPH_WARMUP_STEPS = 3
+
+
+@dataclass(kw_only=True)
+class AcousticGraph:
+    graph: torch.cuda.CUDAGraph
+    hidden: torch.Tensor
+    history: torch.Tensor
+    noise: torch.Tensor
+    timesteps: torch.Tensor
+    diffusion_parameters: torch.Tensor
+    diffusion_noise: torch.Tensor
+    latent: torch.Tensor
+    embeddings: torch.Tensor
+    stop_probability: torch.Tensor
 
 
 class TalkerConfig(BaseModel):
@@ -45,19 +61,84 @@ class TalkerConfig(BaseModel):
 
 
 class Ming3Talker(nn.Module):
-    def __init__(self, config: TalkerConfig, language_config: Qwen2Config) -> None:
+    def __init__(
+        self,
+        config: TalkerConfig,
+        language_config: Qwen2Config,
+        enable_cuda_graph: bool,
+    ) -> None:
         super().__init__()
-        self.config = config
-        self.model = Qwen2Model(language_config)
-        self.cfm = CFM(
+        self.config: TalkerConfig = config
+        self.model: Qwen2Model = Qwen2Model(language_config)
+        self.cfm: CFM = CFM(
             DiT(llm_cond_dim=language_config.hidden_size, **config.flowmodel),
             steps=config.steps,
         )
-        self.aggregator = Aggregator(
+        self.aggregator: Aggregator = Aggregator(
             llm_input_dim=language_config.hidden_size, **config.aggregator
         )
-        self.stop_head = nn.Linear(language_config.hidden_size, 2)
-        self.spk_head = nn.Linear(192, language_config.hidden_size)
+        self.stop_head: nn.Linear = nn.Linear(language_config.hidden_size, 2)
+        self.spk_head: nn.Linear = nn.Linear(192, language_config.hidden_size)
+        self.enable_cuda_graph: bool = enable_cuda_graph
+        self.acoustic_graph: AcousticGraph | None = None
+
+    def decode_acoustic(
+        self,
+        hidden: torch.Tensor,
+        history: torch.Tensor,
+        noise: torch.Tensor,
+        timesteps: torch.Tensor,
+        diffusion_parameters: torch.Tensor,
+        diffusion_noise: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        latent = self.cfm.sample(
+            hidden, history, noise, timesteps, diffusion_parameters, diffusion_noise
+        )
+        embeddings = self.aggregator(latent)
+        stop_probability = self.stop_head(hidden[:, -1]).softmax(dim=-1)[0, 1]
+        return latent, embeddings, stop_probability
+
+    def capture_acoustic_graph(
+        self,
+        hidden: torch.Tensor,
+        history: torch.Tensor,
+        noise: torch.Tensor,
+        timesteps: torch.Tensor,
+        diffusion_parameters: torch.Tensor,
+        diffusion_noise: torch.Tensor,
+    ) -> AcousticGraph:
+        inputs = tuple(
+            tensor.clone()
+            for tensor in (
+                hidden,
+                history,
+                noise,
+                timesteps,
+                diffusion_parameters,
+                diffusion_noise,
+            )
+        )
+        stream = torch.cuda.Stream(device=hidden.device)
+        stream.wait_stream(torch.cuda.current_stream(hidden.device))
+        with torch.cuda.stream(stream):
+            for _ in range(GRAPH_WARMUP_STEPS):
+                self.decode_acoustic(*inputs)
+        torch.cuda.synchronize(hidden.device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream, capture_error_mode="thread_local"):
+            latent, embeddings, stop_probability = self.decode_acoustic(*inputs)
+        return AcousticGraph(
+            graph=graph,
+            hidden=inputs[0],
+            history=inputs[1],
+            noise=inputs[2],
+            timesteps=inputs[3],
+            diffusion_parameters=inputs[4],
+            diffusion_noise=inputs[5],
+            latent=latent,
+            embeddings=embeddings,
+            stop_probability=stop_probability,
+        )
 
     def generate_latents(
         self,
@@ -93,13 +174,41 @@ class Ming3Talker(nn.Module):
                 dtype=noise.dtype,
                 generator=generator,
             )
-            latent = self.cfm.sample(
-                hidden, history, noise, timesteps, diffusion_parameters, diffusion_noise
-            )
-            embeddings = self.aggregator(latent)
+            if self.enable_cuda_graph:
+                if self.acoustic_graph is None:
+                    self.acoustic_graph = self.capture_acoustic_graph(
+                        hidden,
+                        history,
+                        noise,
+                        timesteps,
+                        diffusion_parameters,
+                        diffusion_noise,
+                    )
+                else:
+                    pass
+                captured = self.acoustic_graph
+                captured.hidden.copy_(hidden)
+                captured.history.copy_(history)
+                captured.noise.copy_(noise)
+                captured.timesteps.copy_(timesteps)
+                captured.diffusion_parameters.copy_(diffusion_parameters)
+                captured.diffusion_noise.copy_(diffusion_noise)
+                captured.graph.replay()
+                # note (Codex): Returned patches outlive the graph's reusable output storage.
+                latent = captured.latent.clone()
+                embeddings = captured.embeddings
+                stop_probability = captured.stop_probability
+            else:
+                latent, embeddings, stop_probability = self.decode_acoustic(
+                    hidden,
+                    history,
+                    noise,
+                    timesteps,
+                    diffusion_parameters,
+                    diffusion_noise,
+                )
             history = torch.cat([history[:, config.patch_size :], latent], dim=1)
             generated.append(latent)
-            stop_probability = self.stop_head(hidden[:, -1]).softmax(dim=-1)[0, 1]
             if step > MINIMUM_DECODE_STEPS and bool(stop_probability > 0.5):
                 break
             else:
@@ -109,7 +218,11 @@ class Ming3Talker(nn.Module):
 
 class Ming3SpeechGenerator:
     def __init__(
-        self, model_path: str, device: torch.device, max_decode_steps: int
+        self,
+        model_path: str,
+        device: torch.device,
+        max_decode_steps: int,
+        enable_cuda_graph: bool,
     ) -> None:
         path = Path(model_path) / "talker"
         configuration = TalkerConfig.model_validate_json(
@@ -118,7 +231,9 @@ class Ming3SpeechGenerator:
         language_config = Qwen2Config.from_pretrained(
             path / "llm", attn_implementation="sdpa"
         )
-        self.talker = Ming3Talker(configuration, language_config).eval()
+        self.talker: Ming3Talker = Ming3Talker(
+            configuration, language_config, enable_cuda_graph
+        ).eval()
         self.talker.load_state_dict(load_file(str(path / "model.safetensors")))
         self.talker.to(device=device, dtype=torch.bfloat16)
         self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
@@ -127,19 +242,21 @@ class Ming3SpeechGenerator:
         vae_configuration = json.loads((path / "vae/config.json").read_text())
         for name in ("enc_kwargs", "dec_kwargs"):
             vae_configuration[name]["backbone"]["_attn_implementation"] = "sdpa"
-        self.vae = AudioVAE(AudioVAEconfig(**vae_configuration)).eval()
+        self.vae: AudioVAE = AudioVAE(AudioVAEconfig(**vae_configuration)).eval()
         self.vae.load_state_dict(load_file(str(path / "vae/model.safetensors")))
         self.vae.to(device=device, dtype=torch.bfloat16)
         options = onnxruntime.SessionOptions()
         options.intra_op_num_threads = 2
-        self.speaker_encoder = onnxruntime.InferenceSession(
-            str(path / "campplus.onnx"),
-            sess_options=options,
-            providers=["CPUExecutionProvider"],
+        self.speaker_encoder: onnxruntime.InferenceSession = (
+            onnxruntime.InferenceSession(
+                str(path / "campplus.onnx"),
+                sess_options=options,
+                providers=["CPUExecutionProvider"],
+            )
         )
-        self.device = device
+        self.device: torch.device = device
         self.sample_rate: int = vae_configuration["sample_rate"]
-        self.max_decode_steps = max_decode_steps
+        self.max_decode_steps: int = max_decode_steps
 
     @torch.inference_mode()
     def synthesize(
