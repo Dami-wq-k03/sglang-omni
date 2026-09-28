@@ -70,34 +70,36 @@ def create_talker_executor(
     )
 
     def synthesize(payload: StagePayload) -> StagePayload:
-        parameters = payload.request.metadata.get(
+        speech_parameters = payload.request.metadata.get(
             "tts_params", payload.request.metadata.get("audio_config", {})
         )
-        reference = parameters.get("ref_audio")
-        reference_text = parameters.get("ref_text", "")
+        reference_source = speech_parameters.get("ref_audio")
+        reference_text = speech_parameters.get("ref_text", "")
         inputs = payload.request.inputs
         if isinstance(inputs, dict) and inputs.get("references"):
-            descriptor = inputs["references"][0]
-            reference = descriptor
-            reference_text = descriptor.get("text", reference_text)
+            reference_descriptor = inputs["references"][0]
+            reference_source = reference_descriptor
+            reference_text = reference_descriptor.get("text", reference_text)
         else:
             pass
-        if isinstance(reference, dict):
-            if "data" in reference:
-                reference_audio = base64.b64decode(reference["data"], validate=True)
+        if isinstance(reference_source, dict):
+            if "data" in reference_source:
+                reference_audio = base64.b64decode(
+                    reference_source["data"], validate=True
+                )
             else:
-                reference_audio = Path(reference["audio_path"]).read_bytes()
-        elif isinstance(reference, str):
-            reference_audio = decode_audio_data_uri(reference)
+                reference_audio = Path(reference_source["audio_path"]).read_bytes()
+        elif isinstance(reference_source, str):
+            reference_audio = decode_audio_data_uri(reference_source)
             if reference_audio is None:
-                reference_audio = Path(reference).read_bytes()
+                reference_audio = Path(reference_source).read_bytes()
             else:
                 pass
-        elif isinstance(reference, bytes):
-            reference_audio = reference
+        elif isinstance(reference_source, bytes):
+            reference_audio = reference_source
         else:
             reference_audio = None
-        request_seed = parameters.get("seed", payload.request.params.get("seed"))
+        request_seed = speech_parameters.get("seed", payload.request.params.get("seed"))
         waveform = speech.synthesize(
             payload.data["text"],
             reference_audio,

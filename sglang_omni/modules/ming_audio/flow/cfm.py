@@ -7,7 +7,9 @@ import torch.nn.functional as F
 from torch import nn
 
 
-def get_epss_timesteps(n, device, dtype):
+def get_epss_timesteps(
+    step_count: int, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
     dt = 1 / 32
     predefined_timesteps = {
         5: [0, 2, 4, 8, 16, 32],
@@ -17,12 +19,12 @@ def get_epss_timesteps(n, device, dtype):
         12: [0, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32],
         16: [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32],
     }
-    t = predefined_timesteps.get(n, [])
-    if not t:
-        return torch.linspace(0, 1, n + 1, device=device, dtype=dtype)
+    timestep_indexes = predefined_timesteps.get(step_count, [])
+    if not timestep_indexes:
+        return torch.linspace(0, 1, step_count + 1, device=device, dtype=dtype)
     else:
         pass
-    return dt * torch.tensor(t, device=device, dtype=dtype)
+    return dt * torch.tensor(timestep_indexes, device=device, dtype=dtype)
 
 
 class CFM(nn.Module):

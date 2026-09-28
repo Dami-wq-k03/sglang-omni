@@ -78,22 +78,22 @@ class Ming3AudioEncoder(nn.Module):
         super().__init__()
         self.config: AudioEncoderConfig = config
         self.audio: WhisperEncoder = WhisperEncoder(config)
-        modules: list[nn.Module] = []
+        projection_layers: list[nn.Module] = []
         channels = config.n_audio_state
         for kernel, stride in zip(
             config.downsampler_kernel_size_list,
             config.downsampler_stride_list,
             strict=True,
         ):
-            modules.extend(
+            projection_layers.extend(
                 [
                     nn.Conv1d(channels, hidden_size, kernel, stride, kernel // 2),
                     nn.GELU(),
                 ]
             )
             channels = hidden_size
-        modules.extend([Transpose(), nn.Linear(hidden_size, hidden_size)])
-        self.linear_proj_audio: nn.Sequential = nn.Sequential(*modules)
+        projection_layers.extend([Transpose(), nn.Linear(hidden_size, hidden_size)])
+        self.linear_proj_audio: nn.Sequential = nn.Sequential(*projection_layers)
 
     def load_checkpoint(self, model_path: str) -> None:
         self.audio.load_state_dict(
@@ -110,9 +110,9 @@ class Ming3AudioEncoder(nn.Module):
             for chunk in mel.split(self.config.whisper_chunk_size)
         ]
         lengths = [self.config.output_length(chunk.shape[0]) for chunk in chunks]
-        batch = nn.utils.rnn.pad_sequence(chunks, batch_first=True)
-        batch = batch.to(self.audio.conv1.weight)
-        hidden = self.audio(batch)
+        padded_mels = nn.utils.rnn.pad_sequence(chunks, batch_first=True)
+        padded_mels = padded_mels.to(self.audio.conv1.weight)
+        hidden = self.audio(padded_mels)
         projected = self.linear_proj_audio(hidden.transpose(1, 2))
         return functional.normalize(
             torch.cat([row[:length] for row, length in zip(projected, lengths)]),

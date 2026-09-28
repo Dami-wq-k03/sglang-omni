@@ -13,7 +13,7 @@ import soundfile
 import torch
 import torch.nn.functional as functional
 import torchaudio
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel
 from safetensors.torch import load_file
 from torch import nn
 from transformers import (
@@ -33,7 +33,13 @@ from sglang_omni.utils.audio_features import cached_fbank
 
 TTS_PROMPT = "Please generate speech based on the following description.\n"
 MINIMUM_DECODE_STEPS = 3
+STOP_PROBABILITY_THRESHOLD = 0.5
 SPEAKER_SAMPLE_RATE = 16000
+SPEAKER_MEL_BINS = 80
+SPEAKER_EMBEDDING_DIM = 192
+DIFFUSION_NOISE_SCALE = 0.25
+DIFFUSION_TEMPERATURE = 0.0  # zero temperature drops the SDE noise term
+SPEAKER_ENCODER_INTRA_OP_THREADS = 2
 GRAPH_WARMUP_STEPS = 3
 
 
@@ -51,9 +57,22 @@ class AcousticGraph:
     stop_probability: torch.Tensor
 
 
+class AcousticModuleConfig(BaseModel):
+    in_channels: int
+    hidden_size: int
+    depth: int
+    num_heads: int
+    mlp_ratio: int = 4
+    dropout: float = 0.1
+    attn_backend: str = "flash_attn"
+    attn_mask_enabled: bool = True
+    pe_attn_head: int | None = None
+    qk_norm: str | None = None
+
+
 class TalkerConfig(BaseModel):
-    aggregator: dict[str, JsonValue]
-    flowmodel: dict[str, JsonValue]
+    aggregator: AcousticModuleConfig
+    flowmodel: AcousticModuleConfig
     patch_size: int
     history_patch_size: int
     steps: int
@@ -71,14 +90,20 @@ class Ming3Talker(nn.Module):
         self.config: TalkerConfig = config
         self.model: Qwen2Model = Qwen2Model(language_config)
         self.cfm: CFM = CFM(
-            DiT(llm_cond_dim=language_config.hidden_size, **config.flowmodel),
+            DiT(
+                llm_cond_dim=language_config.hidden_size,
+                **config.flowmodel.model_dump(),
+            ),
             steps=config.steps,
         )
         self.aggregator: Aggregator = Aggregator(
-            llm_input_dim=language_config.hidden_size, **config.aggregator
+            llm_input_dim=language_config.hidden_size,
+            **config.aggregator.model_dump(),
         )
         self.stop_head: nn.Linear = nn.Linear(language_config.hidden_size, 2)
-        self.spk_head: nn.Linear = nn.Linear(192, language_config.hidden_size)
+        self.spk_head: nn.Linear = nn.Linear(
+            SPEAKER_EMBEDDING_DIM, language_config.hidden_size
+        )
         self.enable_cuda_graph: bool = enable_cuda_graph
         self.acoustic_graph: AcousticGraph | None = None
 
@@ -155,7 +180,9 @@ class Ming3Talker(nn.Module):
         timesteps = get_epss_timesteps(
             config.steps, embeddings.device, embeddings.dtype
         )
-        diffusion_parameters = embeddings.new_tensor([config.cfg_strength, 0.25, 0.0])
+        diffusion_parameters = embeddings.new_tensor(
+            [config.cfg_strength, DIFFUSION_NOISE_SCALE, DIFFUSION_TEMPERATURE]
+        )
         cache = DynamicCache(config=self.model.config)
         generated: list[torch.Tensor] = []
         for step in range(max_decode_steps):
@@ -209,7 +236,9 @@ class Ming3Talker(nn.Module):
                 )
             history = torch.cat([history[:, config.patch_size :], latent], dim=1)
             generated.append(latent)
-            if step > MINIMUM_DECODE_STEPS and bool(stop_probability > 0.5):
+            if step > MINIMUM_DECODE_STEPS and bool(
+                stop_probability > STOP_PROBABILITY_THRESHOLD
+            ):
                 break
             else:
                 pass
@@ -245,12 +274,12 @@ class Ming3SpeechGenerator:
         self.vae: AudioVAE = AudioVAE(AudioVAEconfig(**vae_configuration)).eval()
         self.vae.load_state_dict(load_file(str(path / "vae/model.safetensors")))
         self.vae.to(device=device, dtype=torch.bfloat16)
-        options = onnxruntime.SessionOptions()
-        options.intra_op_num_threads = 2
+        session_options = onnxruntime.SessionOptions()
+        session_options.intra_op_num_threads = SPEAKER_ENCODER_INTRA_OP_THREADS
         self.speaker_encoder: onnxruntime.InferenceSession = (
             onnxruntime.InferenceSession(
                 str(path / "campplus.onnx"),
-                sess_options=options,
+                sess_options=session_options,
                 providers=["CPUExecutionProvider"],
             )
         )
@@ -287,15 +316,17 @@ class Ming3SpeechGenerator:
                 waveform, sample_rate, SPEAKER_SAMPLE_RATE
             )
             features = cached_fbank(
-                speaker_waveform, num_mel_bins=80, sample_frequency=SPEAKER_SAMPLE_RATE
+                speaker_waveform,
+                num_mel_bins=SPEAKER_MEL_BINS,
+                sample_frequency=SPEAKER_SAMPLE_RATE,
             )
             features -= features.mean(dim=0, keepdim=True)
             speaker_vector = self.speaker_encoder.run(
                 None,
                 {
-                    self.speaker_encoder.get_inputs()[0]
-                    .name: features.unsqueeze(0)
-                    .numpy()
+                    self.speaker_encoder.get_inputs()[0].name: features.unsqueeze(
+                        0
+                    ).numpy()
                 },
             )[0]
             speaker_embedding = talker.spk_head(

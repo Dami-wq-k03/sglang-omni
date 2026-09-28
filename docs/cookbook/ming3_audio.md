@@ -148,7 +148,7 @@ To investigate the optional thinker optimization, set
 used `max_total_tokens: 65536` and `cuda_graph_backend_prefill: "disabled"` under
 `stages.thinker.engine`. These settings do not enable prefill graph capture.
 
-The model's 18 unit tests pass, including CUDA graph parity across successive
+The model's 22 unit tests pass, including CUDA graph parity across successive
 requests and early stopping. The related Ming suites report 438 passed and two
 pre-existing failures in `ming_omni/test_tp.py`: their mocked torch profiler lacks
 `supported_activities`. Both failures were reproduced on the unchanged base

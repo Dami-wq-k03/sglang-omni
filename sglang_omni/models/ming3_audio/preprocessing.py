@@ -62,8 +62,11 @@ class AudioMediaIO(MediaIO[torch.Tensor]):
             waveform, sample_rate = parse_wav_bytes(data)
         except ValueError:
             waveform, sample_rate = decode_audio_bytes_av(data)
+        writable_waveform = np.array(waveform, dtype=np.float32, copy=True)
         return torchaudio.functional.resample(
-            torch.from_numpy(waveform), sample_rate, whisper.audio.SAMPLE_RATE
+            torch.from_numpy(writable_waveform),
+            sample_rate,
+            whisper.audio.SAMPLE_RATE,
         )
 
     def load_base64(self, media_type: str, data: str) -> torch.Tensor:
