@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from pydantic import JsonValue
 from sglang.srt.configs.bailing_hybrid import BailingHybridConfig
 
 
 class Ming3AudioConfig(BailingHybridConfig):
-    model_type = "bailing_moe_v3_audio"
+    model_type: ClassVar[str] = "bailing_moe_v3_audio"
 
     def __init__(
         self,

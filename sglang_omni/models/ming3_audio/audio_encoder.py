@@ -40,14 +40,16 @@ class AudioEncoderConfig(BaseModel):
 class WhisperEncoder(nn.Module):
     def __init__(self, config: AudioEncoderConfig) -> None:
         super().__init__()
-        self.conv1 = nn.Conv1d(config.n_mels, config.n_audio_state, 3, padding=1)
-        self.conv2 = nn.Conv1d(
+        self.conv1: nn.Conv1d = nn.Conv1d(
+            config.n_mels, config.n_audio_state, 3, padding=1
+        )
+        self.conv2: nn.Conv1d = nn.Conv1d(
             config.n_audio_state, config.n_audio_state, 3, stride=2, padding=1
         )
-        self.positional_embedding = nn.Parameter(
+        self.positional_embedding: nn.Parameter = nn.Parameter(
             torch.zeros(config.n_audio_ctx, config.n_audio_state)
         )
-        self.blocks = nn.ModuleList(
+        self.blocks: nn.ModuleList = nn.ModuleList(
             ResidualAttentionBlock(config.n_audio_state, config.n_audio_head)
             for _ in range(config.n_audio_layer)
         )
@@ -55,7 +57,7 @@ class WhisperEncoder(nn.Module):
         for block in self.blocks:
             block.attn_ln = nn.LayerNorm(config.n_audio_state)
             block.mlp_ln = nn.LayerNorm(config.n_audio_state)
-        self.ln_post = nn.LayerNorm(config.n_audio_state)
+        self.ln_post: nn.LayerNorm = nn.LayerNorm(config.n_audio_state)
 
     def forward(self, mel: torch.Tensor) -> torch.Tensor:
         hidden = functional.gelu(self.conv1(mel.transpose(1, 2)))
@@ -74,8 +76,8 @@ class Transpose(nn.Module):
 class Ming3AudioEncoder(nn.Module):
     def __init__(self, config: AudioEncoderConfig, hidden_size: int) -> None:
         super().__init__()
-        self.config = config
-        self.audio = WhisperEncoder(config)
+        self.config: AudioEncoderConfig = config
+        self.audio: WhisperEncoder = WhisperEncoder(config)
         modules: list[nn.Module] = []
         channels = config.n_audio_state
         for kernel, stride in zip(
@@ -91,7 +93,7 @@ class Ming3AudioEncoder(nn.Module):
             )
             channels = hidden_size
         modules.extend([Transpose(), nn.Linear(hidden_size, hidden_size)])
-        self.linear_proj_audio = nn.Sequential(*modules)
+        self.linear_proj_audio: nn.Sequential = nn.Sequential(*modules)
 
     def load_checkpoint(self, model_path: str) -> None:
         self.audio.load_state_dict(

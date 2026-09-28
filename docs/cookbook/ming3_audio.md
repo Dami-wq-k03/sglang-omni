@@ -58,7 +58,7 @@ response.raise_for_status()
 Path("speech.wav").write_bytes(response.content)
 ```
 
-Speech is generated at 44.1 kHz. The baseline returns the complete waveform;
+Speech is generated at 44.1 kHz. The pipeline returns the complete waveform;
 incremental speech output is not implemented. Requests are processed serially
 within the speech synthesis stage. The reference transcript should match the
 reference recording.
@@ -98,3 +98,60 @@ python -m benchmarks.eval.benchmark_asr_seedtts \
   --lang en --concurrencies 4 --repeats 1 --warmup \
   --output asr_seedtts_results.json
 ```
+
+## Optimizations and parity
+
+The default enables CUDA graph replay for the speech decoder's flow matching,
+aggregator, and stop head. Random noise is generated outside capture using the
+request seed. Audio encoding, the talker's language model, and VAE decoding
+remain eager. The encoder-to-thinker transfer still passes through host memory,
+and speech generation still synchronizes on its stop decision each step.
+
+All 1088 speech waveforms match the eager baseline exactly when the same WAV
+serialization is used. An initial independent scoring pass measured **1.122%
+WER** because its standalone WAV writer differed from the HTTP writer used for
+the baseline's first 373 samples by at most two PCM16 levels. Repeating those
+373 through the same HTTP endpoint removed every waveform difference; the other
+715 were already identical. The full eager correctness checkpoint is preserved
+in the local tag `ming3-audio-eager-baseline`.
+
+A paired benchmark on one H200 measured 100 consecutive SeedTTS entries after
+one warmup pair, with no other GPU work on that device. Each pair used the same
+loaded model, input, reference, and seed. Mean complete synthesis time, including
+reference encoding and VAE decoding but excluding HTTP, fell from **0.982 s** to
+**0.338 s** (**2.91x**). Median times were 0.910 s and 0.323 s. All 101 pairs,
+including warmup, produced bitwise-identical floating-point waveforms. This is a
+single-request benchmark, not a concurrent serving throughput measurement.
+
+Thinker decode CUDA graphs and the shared asynchronous scheduler were also tested
+on all 1088 ASR inputs. They produced **1.188% WER**, with three normalized
+transcripts differing from the eager baseline's **1.165%**. These options remain
+disabled by default because output parity has not been established.
+
+To reproduce the eager baseline, write a local JSON configuration and pass its
+path to `sgl-omni serve --config`:
+
+```json
+{
+  "config_cls": "Ming3AudioPipelineConfig",
+  "model_path": "/path/to/local/checkpoint",
+  "stages": {
+    "talker": {"factory": {"enable_cuda_graph": false}}
+  }
+}
+```
+
+To investigate the optional thinker optimization, set
+`stages.thinker.factory.enable_async_decode` to `true`,
+`stages.thinker.engine.disable_cuda_graph` to `false`, and
+`stages.thinker.engine.cuda_graph_max_bs` to `8`. The evaluated configuration also
+used `max_total_tokens: 65536` and `cuda_graph_backend_prefill: "disabled"` under
+`stages.thinker.engine`. These settings do not enable prefill graph capture.
+
+The model's 18 unit tests pass, including CUDA graph parity across successive
+requests and early stopping. The related Ming suites report 438 passed and two
+pre-existing failures in `ming_omni/test_tp.py`: their mocked torch profiler lacks
+`supported_activities`. Both failures were reproduced on the unchanged base
+commit. All repository pre-commit checks pass. Text chat, speech synthesis,
+transcription, and the model's supplied speech-question example were exercised
+through the HTTP API.
