@@ -23,7 +23,10 @@ from sglang_omni.preprocessing.resource_connector import get_global_resource_con
 from sglang_omni.proto.request import StagePayload
 
 AUDIO_PLACEHOLDER = "<|audio_pad|>"
-ASR_PROMPT = "Please transcribe the speech into text. Only output the transcription."
+ASR_PROMPT = (
+    "Please recognize the language of this speech and transcribe it with appropriate "
+    "punctuation marks, placing a `\t` between the identified language and the transcribe."
+)
 
 
 class InputAudio(BaseModel):
@@ -103,6 +106,10 @@ class Ming3AudioPreprocessor:
             else:
                 payload.data = {"text": raw_inputs["text"]}
             return payload
+        elif isinstance(raw_inputs, str):
+            inputs = AudioChatInputs(
+                messages=[ChatMessage(role="user", content=raw_inputs)]
+            )
         elif isinstance(raw_inputs, list):
             inputs = AudioChatInputs(messages=raw_inputs)
         else:
@@ -113,8 +120,8 @@ class Ming3AudioPreprocessor:
                 ChatMessage(
                     role="user",
                     content=[
-                        ContentPart(type="audio"),
                         ContentPart(type="text", text=ASR_PROMPT),
+                        ContentPart(type="audio"),
                     ],
                 )
             ]

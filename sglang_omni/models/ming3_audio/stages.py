@@ -230,8 +230,15 @@ def create_thinker_executor(
 
     def build_result(request: SGLangARRequestData) -> StagePayload:
         payload = request.stage_payload
+        text = tokenizer.decode(request.output_ids, skip_special_tokens=True).strip()
+        if payload.request.metadata.get("task") == "asr":
+            # note (Codex): ASR generation prefixes the transcript with language and a tab.
+            _, separator, transcript = text.partition("\t")
+            text = transcript if separator else text
+        else:
+            pass
         payload.data = {
-            "text": tokenizer.decode(request.output_ids, skip_special_tokens=True),
+            "text": text,
             "usage": {
                 "prompt_tokens": len(request.input_ids),
                 "completion_tokens": len(request.output_ids),
