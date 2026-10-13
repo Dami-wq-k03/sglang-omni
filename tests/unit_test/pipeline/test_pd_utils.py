@@ -6,6 +6,7 @@ import queue
 from array import array
 from dataclasses import replace
 
+import pytest
 import torch
 from sglang.srt.managers.schedule_batch import CaptureHiddenMode, Req
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
@@ -18,6 +19,7 @@ from sglang_omni.proto import (
     OmniRequest,
     StagePayload,
 )
+from sglang_omni.proto.session import SessionIdentity, SessionOperation
 from sglang_omni.scheduling.pd_utils import (
     DecodeContinuation,
     DecodeKVReceiver,
@@ -240,3 +242,29 @@ def test_prefill_defers_first_token_stop_policy_to_decode() -> None:
     assert req.sampling_params.max_new_tokens == original_max
     req.update_finish_state()
     assert req.finished()
+
+
+@pytest.mark.parametrize("priority", [None, -7, 0, 7])
+def test_continuation_preserves_request_priority(priority: int | None) -> None:
+    request = prefill_req()
+    request.priority = priority
+    assert rebuilt_req(request).priority == priority
+
+
+@pytest.mark.parametrize("priority", [True, 1.5, "7"])
+def test_continuation_rejects_invalid_priority(priority: object) -> None:
+    request = prefill_req()
+    request.priority = priority
+    with pytest.raises(ValueError, match="priority"):
+        continuation_from_req(request, "transfer", state_builder)
+
+
+def test_pd_rejects_retained_session_metadata() -> None:
+    request = prefill_req()
+    request.omni_data.stage_payload.request.metadata["omni_session"] = SessionOperation(
+        operation="open",
+        session_identity=SessionIdentity("session"),
+        stages=("thinker",),
+    ).to_dict()
+    with pytest.raises(NotImplementedError, match="session"):
+        continuation_from_req(request, "transfer", state_builder)

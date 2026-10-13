@@ -20,6 +20,7 @@ from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.pd_scheduler import (
     OmniDecodeScheduler,
     OmniPrefillScheduler,
+    validate_pd_runtime,
 )
 from sglang_omni.scheduling.pd_utils import (
     DecodeAdmission,
@@ -729,3 +730,10 @@ def test_replicated_decode_target_uses_bound_instance_and_pool():
         transfer.lease.release.assert_called_once()
 
     asyncio.run(run())
+
+
+def test_pd_rejects_retained_session_runtime() -> None:
+    scheduler = object.__new__(OmniDecodeScheduler)
+    scheduler.server_args = SimpleNamespace(enable_streaming_session=True)
+    with pytest.raises(NotImplementedError, match="retained streaming sessions"):
+        validate_pd_runtime(scheduler)
