@@ -276,3 +276,24 @@ def test_continuation_rejects_native_session_without_metadata() -> None:
     request.session = Mock()
     with pytest.raises(NotImplementedError, match="retained streaming-session"):
         continuation_from_req(request, "transfer-1", state_builder)
+
+
+@pytest.mark.parametrize(
+    "rollback_parameter",
+    ["_asr_streaming_rollback_tokens", "_asr_streaming_rollback_chars"],
+)
+def test_continuation_allows_asr_refresh_without_retained_kv(
+    rollback_parameter: str,
+) -> None:
+    request = prefill_req()
+    parameters = request.omni_data.stage_payload.request.params
+    parameters.update(
+        {
+            "_asr_streaming": True,
+            "_asr_streaming_prefix_text": "Previously recognized text",
+            rollback_parameter: 5,
+        }
+    )
+    restored = rebuilt_req(request)
+    assert restored.session is None
+    assert restored.omni_data.stage_payload.request.params == parameters
