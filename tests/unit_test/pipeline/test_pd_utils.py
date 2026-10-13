@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 from array import array
 from dataclasses import replace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -268,3 +269,10 @@ def test_pd_rejects_retained_session_metadata() -> None:
     ).to_dict()
     with pytest.raises(NotImplementedError, match="session"):
         continuation_from_req(request, "transfer", state_builder)
+
+
+def test_continuation_rejects_native_session_without_metadata() -> None:
+    request = prefill_req()
+    request.session = Mock()
+    with pytest.raises(NotImplementedError, match="retained streaming-session"):
+        continuation_from_req(request, "transfer-1", state_builder)

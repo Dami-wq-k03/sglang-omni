@@ -498,8 +498,10 @@ class OmniDecodeScheduler(PDKVLifecycle):
 
 
 def validate_pd_runtime(scheduler: OmniScheduler) -> None:
-    if scheduler.server_args.enable_streaming_session:
-        raise NotImplementedError("PD does not support retained streaming sessions")
+    if scheduler.session_adapter is not None:
+        raise NotImplementedError(
+            "PD session adapters require a retained-state ownership contract"
+        )
     else:
         pass
     if scheduler.tp_size != 1:

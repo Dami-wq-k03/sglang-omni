@@ -211,7 +211,10 @@ def continuation_from_req(
     data = (
         req.omni_data
     )  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
-    if find_session_operation(data.stage_payload.request.metadata) is not None:
+    if (
+        req.session is not None
+        or find_session_operation(data.stage_payload.request.metadata) is not None
+    ):
         raise NotImplementedError(
             "PD does not transfer retained streaming-session state"
         )
