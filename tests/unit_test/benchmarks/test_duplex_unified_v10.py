@@ -97,6 +97,12 @@ SAMPLES = [
         [[5.5, 6.0]],
         12.0,
     ),
+    (
+        "synthetic_user_interruption/7",
+        ("interrupt.json", INTERRUPT),
+        [[5.0, 5.5]],
+        12.0,
+    ),
     ("icc_backchannel/1", None, [[0.5, 0.75]], 8.0),
 ]
 # note (luojiaxuan): the speech segments the fake VAD returns per sample; the
@@ -107,6 +113,7 @@ SPEECH = {
     "synthetic_user_interruption/4": [(2.0, 3.5), (7.5, 8.0)],
     "synthetic_user_interruption/5": [(2.0, 4.0), (4.25, 6.0)],
     "synthetic_user_interruption/6": [(0.5, 2.5), (5.5, 6.0)],
+    "synthetic_user_interruption/7": [(2.0, 4.0), (5.0, 6.0)],
 }
 
 
@@ -116,7 +123,9 @@ def fake_vad(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         unified_v10,
         "speech_segments",
-        lambda path, vad: SPEECH[f"{path.parent.parent.name}/{path.parent.name}"],
+        lambda path, window_s, vad: SPEECH[
+            f"{path.parent.parent.name}/{path.parent.name}"
+        ],
     )
 
 
@@ -323,7 +332,11 @@ def test_timestamp_problems_name_each_time_the_window_cannot_score() -> None:
 
     assert problems("turn_taking", [(2.5, 3.0), (10.0, 10.0)], 2.0) == []
     assert problems("turn_taking", [(12.0, 12.5)], 1.0) == [
-        "word start 12.0 is outside [0, 10.0]"
+        "word start 12.0 is outside [0, 10.0]",
+        "word end 12.5 is outside [0, 10.0]",
+    ]
+    assert problems("turn_taking", [(2.5, 2.0)], 1.0) == [
+        "word [2.5, 2.0] ends before it starts"
     ]
     assert problems("turn_taking", [(-0.5, 0.0)], 1.0) == [
         "word start -0.5 is outside [0, 10.0]"
@@ -339,8 +352,8 @@ def test_timestamp_problems_name_each_time_the_window_cannot_score() -> None:
     assert problems("user_interruption", [], (5.0, 4.0)) == [
         "interruption [5.0, 4.0] ends before it starts"
     ]
-    assert problems("pause_handling", [(12.0, 12.5)], [(1.0, 2.0)]) == [
-        "word start 12.0 is outside [0, 10.0]"
+    assert problems("pause_handling", [(9.5, 12.5)], [(1.0, 2.0)]) == [
+        "word end 12.5 is outside [0, 10.0]"
     ]
     assert problems("pause_handling", [], [(1.0, 2.0), (2.0, 2.0), (3.0, 10.0)]) == []
     assert problems("pause_handling", [], []) == ["pause.json lists no pause"]
@@ -550,24 +563,31 @@ def test_unified_score_writes_metrics_rows_and_reference_column(
     assert turn["min_observable_s"] == 2.0
 
     interruption = unified["subsets"]["synthetic_user_interruption"]
-    assert interruption["counts"]["eligible"] == 5
-    assert interruption["coverage"] == 5 / 6
+    assert interruption["counts"]["eligible"] == 6
+    assert interruption["coverage"] == 6 / 7
     metrics = interruption["metrics"]
     assert "early_start_rate" not in metrics
     assert (metrics["exercised_rate"]["count"], metrics["exercised_rate"]["n"]) == (
-        4,
         5,
+        6,
     )
-    assert metrics["exercised_rate"]["selected_bounds"] == [4 / 6, 5 / 6]
+    assert metrics["exercised_rate"]["selected_bounds"] == [5 / 7, 6 / 7]
     assert (
         metrics["speaking_at_end_rate"]["count"],
         metrics["speaking_at_end_rate"]["n"],
-    ) == (1, 4)
-    assert metrics["response_rate_1s"]["count"] == 2
-    assert metrics["response_rate_1s"]["selected_bounds"] == [2 / 6, 4 / 6]
+    ) == (1, 5)
+    assert metrics["response_rate_1s"]["count"] == 3
+    assert metrics["response_rate_1s"]["selected_bounds"] == [3 / 7, 5 / 7]
     assert metrics["no_response_rate"]["count"] == 1
     latency = metrics["response_latency_s"]
-    assert (latency["n"], latency["responses"], latency["median_s"]) == (4, 2, 1.0)
+    assert (latency["n"], latency["responses"], latency["median_s"]) == (5, 3, 1.0)
+    stop = metrics["stop_latency_s"]
+    assert (stop["n"], stop["stopped"], stop["median_s"]) == (5, 5, 1.0)
+    overlap = metrics["speech_s_per_interruption_s"]
+    assert (overlap["numerator"], overlap["denominator"]) == pytest.approx(
+        (4.75, 11.52)
+    )
+    assert metrics["restart_rate"]["count"] == 1
 
     rows = [
         json.loads(line)
@@ -597,6 +617,7 @@ def test_unified_score_writes_metrics_rows_and_reference_column(
     assert by_id["synthetic_user_interruption/1"]["observable_s"] == 7.0
     assert by_id["synthetic_user_interruption/4"]["latency_s"] == 1.0
     assert by_id["synthetic_user_interruption/1"]["outcome"] == "response"
+    assert by_id["synthetic_user_interruption/7"]["latency_s"] == 0.0
     assert by_id["synthetic_user_interruption/5"]["outcome"] == "speaking_at_end"
     assert by_id["synthetic_user_interruption/5"]["latency_s"] is None
     assert by_id["synthetic_user_interruption/6"]["outcome"] == "not_exercised"
@@ -731,7 +752,9 @@ def test_silero_segments_need_the_reference_wav_format(
     vad = unified_v10.load_silero_vad()
     silence = tmp_path / "silence.wav"
     soundfile.write(silence, np.zeros(16000, dtype=np.int16), 16000)
-    assert unified_v10.speech_segments(silence, vad) == []
+    assert unified_v10.speech_segments(silence, 1.0, vad) == []
+    with pytest.raises(SystemExit, match="has 16000 samples; T is 2.0 s"):
+        unified_v10.speech_segments(silence, 2.0, vad)
     for name, rate, subtype in (
         ("cd.wav", 22050, "PCM_16"),
         ("float.wav", 16000, "FLOAT"),
@@ -740,4 +763,34 @@ def test_silero_segments_need_the_reference_wav_format(
             tmp_path / name, np.zeros(rate, dtype=np.float32), rate, subtype=subtype
         )
         with pytest.raises(SystemExit, match="reference layout"):
-            unified_v10.speech_segments(tmp_path / name, vad)
+            unified_v10.speech_segments(tmp_path / name, 1.0, vad)
+
+
+@pytest.mark.parametrize(
+    ("speech", "words", "outcome", "flags"),
+    [
+        ([(1.0, 3.999), (4.2, 5.0)], [4.2], "response", (True, False, 0)),
+        ([(1.0, 2.2), (2.7, 3.8), (4.2, 5.0)], [4.2], "response", (True, False, 1)),
+        ([(2.2, 4.5)], [4.2], "not_exercised", (False, True, 1)),
+        ([(1.0, 2.2), (4.0, 5.0)], [4.0], "response", (True, False, 0)),
+        ([(1.0, 4.5)], [4.2], "speaking_at_end", (True, True, 0)),
+    ],
+)
+def test_interruption_outcome_and_diagnostics(
+    speech: list, words: list, outcome: str, flags: tuple
+) -> None:
+    sample = unified_v10.interruption_sample(words, speech, (2.0, 4.0), 8.0)
+    assert sample["outcome"] == outcome
+    assert (
+        sample["speech_at_onset"],
+        sample["speech_at_end"],
+        sample["restarts"],
+    ) == flags
+
+
+def test_interruption_stop_is_unobserved_when_speech_runs_to_the_window_end() -> None:
+    sample = unified_v10.interruption_sample([], [(1.0, 8.0)], (2.0, 4.0), 8.0)
+    assert (sample["outcome"], sample["stop_s"]) == ("speaking_at_end", None)
+    assert sample["speech_in_interruption_s"] == 2.0
+    stopped = unified_v10.interruption_sample([], [(1.0, 3.5)], (2.0, 4.0), 8.0)
+    assert (stopped["stop_s"], stopped["speech_in_interruption_s"]) == (1.5, 1.5)
