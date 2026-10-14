@@ -14,6 +14,11 @@ from uuid import uuid4
 
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, Req, ScheduleBatch
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
+from sglang.srt.mem_cache.allocator.swa import (
+    PureSWATokenToKVPoolAllocator,
+    SWATokenToKVPoolAllocator,
+)
+from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool
 
 from sglang_omni.comm import KVPageTransfer
 from sglang_omni.scheduling.message import OutgoingMessage, put_messages
@@ -502,6 +507,15 @@ def validate_pd_runtime(scheduler: OmniScheduler) -> None:
         raise NotImplementedError(
             "PD session adapters require a retained-state ownership contract"
         )
+    else:
+        pass
+    if isinstance(scheduler.req_to_token_pool, HybridReqToTokenPool):
+        raise NotImplementedError("PD does not transfer linear-attention state")
+    elif isinstance(
+        scheduler.token_to_kv_pool_allocator,
+        (PureSWATokenToKVPoolAllocator, SWATokenToKVPoolAllocator),
+    ):
+        raise NotImplementedError("PD does not transfer sliding-window KV ownership")
     else:
         pass
     if scheduler.tp_size != 1:

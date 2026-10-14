@@ -12,10 +12,14 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import torch
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
+from sglang.srt.mem_cache.allocator.swa import (
+    PureSWATokenToKVPoolAllocator,
+    SWATokenToKVPoolAllocator,
+)
 from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 from sglang.srt.mem_cache.chunk_cache import ChunkCache
-from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
+from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool, ReqToTokenPool
 from sglang.srt.runtime_context import get_context
 from sglang.srt.session.streaming_session import StreamingSession
 
@@ -760,6 +764,8 @@ def test_pd_allows_session_flag_without_adapter(
 ) -> None:
     scheduler = object.__new__(scheduler_type)
     scheduler.session_adapter = None
+    scheduler.req_to_token_pool = ReqPool()
+    scheduler.token_to_kv_pool_allocator = KVAllocator()
     scheduler.server_args = SimpleNamespace(
         enable_streaming_session=session_enabled, disable_radix_cache=True
     )
@@ -914,3 +920,28 @@ def test_pd_receive_keeps_reserved_pages_until_copy_finishes(
         event.copy_done.set()
         relay.close()
         executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("scheduler_type", [OmniPrefillScheduler, OmniDecodeScheduler])
+@pytest.mark.parametrize("pool_kind", ["linear", "pure_swa", "hybrid_swa"])
+def test_pd_rejects_state_not_carried_by_page_transfer(
+    scheduler_type: type[OmniPrefillScheduler] | type[OmniDecodeScheduler],
+    pool_kind: str,
+) -> None:
+    scheduler = object.__new__(scheduler_type)
+    scheduler.session_adapter = None
+    scheduler.req_to_token_pool = ReqPool()
+    scheduler.token_to_kv_pool_allocator = KVAllocator()
+    if pool_kind == "linear":
+        scheduler.req_to_token_pool = object.__new__(HybridReqToTokenPool)
+        message = "linear-attention state"
+    else:
+        allocator_type = (
+            PureSWATokenToKVPoolAllocator
+            if pool_kind == "pure_swa"
+            else SWATokenToKVPoolAllocator
+        )
+        scheduler.token_to_kv_pool_allocator = object.__new__(allocator_type)
+        message = "sliding-window KV ownership"
+    with pytest.raises(NotImplementedError, match=message):
+        validate_pd_runtime(scheduler)
