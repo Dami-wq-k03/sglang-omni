@@ -696,11 +696,11 @@ the preprocessing stage. The budgets of all stages on the GPU must still fit the
 </section>
 <section id="int4-checkpoint">
 <h2>Int4 Checkpoint<a class="headerlink" href="#int4-checkpoint" title="Link to this heading">#</a></h2>
-<p><a class="reference external" href="https://huggingface.co/akhaliq/drama-3-int4"><code class="docutils literal notranslate"><span class="pre">akhaliq/drama-3-int4</span></code></a> is a 4-bit GPTQ quantization of Drama 3. The server reads its quantization from the checkpoint, so it starts with the same command:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>hf<span class="w"> </span>download<span class="w"> </span>akhaliq/drama-3-int4
+<p><a class="reference external" href="https://huggingface.co/fishaudio/drama-3-int4"><code class="docutils literal notranslate"><span class="pre">fishaudio/drama-3-int4</span></code></a> is a 4-bit GPTQ quantization of Drama 3. Thanks so much to <a class="reference external" href="https://x.com/_akhaliq">AK</a> for the quantization! The server reads its quantization from the checkpoint, so it starts with the same command:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>hf<span class="w"> </span>download<span class="w"> </span>fishaudio/drama-3-int4
 
 sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--model-path<span class="w"> </span>akhaliq/drama-3-int4<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-path<span class="w"> </span>fishaudio/drama-3-int4<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
@@ -728,7 +728,7 @@ sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\<
 <td class="text-right"><p>1.99%</p></td>
 <td class="text-right"><p>1.32%</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">akhaliq/drama-3-int4</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fishaudio/drama-3-int4</span></code></p></td>
 <td class="text-right"><p>20.8 GB</p></td>
 <td class="text-right"><p>1.334 s</p></td>
 <td class="text-right"><p>2.178 s</p></td>
