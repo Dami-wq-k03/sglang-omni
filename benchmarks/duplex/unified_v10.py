@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import bisect
+import importlib.metadata
 import json
 import math
 import random
@@ -14,7 +15,11 @@ from pathlib import Path
 from statistics import NormalDist
 from typing import TypeVar
 
+import numpy as np
+import soundfile
+import torch
 from pydantic import JsonValue
+from silero_vad import get_speech_timestamps, load_silero_vad
 
 from benchmarks.duplex.reference_core import (
     atomic_write_bytes,
@@ -32,7 +37,7 @@ from benchmarks.duplex.v10_dataset import (
 )
 
 KIND = "full-duplex-bench-v1.0-unified"
-DEFINITIONS_VERSION = "fdb-v1.0-unified-3"
+DEFINITIONS_VERSION = "fdb-v1.0-unified-4"
 RESPONSE_WITHIN_S = (1, 2, 5)
 TIME_DECIMALS = 6
 BOOTSTRAP_REPLICATES = 2000
@@ -42,8 +47,17 @@ MEDIAN = Fraction(1, 2)
 P90 = Fraction(9, 10)
 INTERVAL_TAILS = (Fraction(1, 40), Fraction(39, 40))
 PAUSE_DIAGNOSTICS = ("inside_pause_onset", "pre_pause_speech", "carry_in", "any_speech")
+VAD_RATE = 16000
+# note (luojiaxuan): Silero's get_speech_timestamps defaults, which the official
+# eval_backchannel.py also uses.
+SILERO_VAD_CONFIG = {
+    "threshold": 0.5,
+    "min_speech_duration_ms": 250,
+    "min_silence_duration_ms": 100,
+    "speech_pad_ms": 30,
+}
 Span = tuple[float, float]
-Reference = list[Span] | float
+Reference = list[Span] | Span | float
 Resampled = TypeVar("Resampled")
 
 
@@ -57,6 +71,29 @@ def word_spans(chunks: list[dict[str, JsonValue]]) -> list[Span]:
     return [
         (seconds(start), seconds(start if end is None else end))
         for start, end in (chunk["timestamp"] for chunk in chunks)
+    ]
+
+
+def speech_segments(wav_path: Path, vad: torch.jit.ScriptModule) -> list[Span]:
+    """Silero speech segments of a reference output.wav, 16 kHz mono PCM16."""
+    info = soundfile.info(str(wav_path))
+    if (info.samplerate, info.channels, info.subtype) != (VAD_RATE, 1, "PCM_16"):
+        raise SystemExit(
+            f"{wav_path} is {info.samplerate} Hz, {info.channels} channels, "
+            f"{info.subtype}; the reference layout is {VAD_RATE} Hz mono PCM_16"
+        )
+    else:
+        pass
+    audio, _ = soundfile.read(str(wav_path), dtype="float32")
+    timestamps = get_speech_timestamps(
+        torch.from_numpy(np.ascontiguousarray(audio)),
+        vad,
+        sampling_rate=VAD_RATE,
+        **SILERO_VAD_CONFIG,
+    )
+    return [
+        (seconds(span["start"] / VAD_RATE), seconds(span["end"] / VAD_RATE))
+        for span in timestamps
     ]
 
 
@@ -144,8 +181,36 @@ def turn_taking_sample(
     return sample
 
 
+def speaking(speech: list[Span], time_s: float) -> bool:
+    return any(start <= time_s < end for start, end in speech)
+
+
+def interruption_sample(
+    starts: list[float], speech: list[Span], interruption: Span, window_s: float
+) -> dict[str, JsonValue]:
+    """Gate a reply on the model's speech at the interruption onset S and end R.
+
+    Without speech at S nothing was interrupted (not_exercised). Speech at R
+    means the model had not yielded when the user finished (speaking_at_end),
+    and the words after R may continue the interrupted answer.
+    """
+    onset_s, end_s = interruption
+    sample = {
+        "onset_s": onset_s,
+        "speech_before_onset": any(start < onset_s for start, _ in speech),
+        **response_sample(starts, end_s, window_s),
+    }
+    if not speaking(speech, onset_s):
+        sample.update(outcome="not_exercised", latency_s=None)
+    elif speaking(speech, end_s):
+        sample.update(outcome="speaking_at_end", latency_s=None)
+    else:
+        pass
+    return sample
+
+
 def reference_times(task: Task, annotation: JsonValue) -> Reference:
-    """The pauses for pause handling, E for turn-taking, R for user interruption."""
+    """The pauses for pause handling, E for turn-taking, (S, R) for user interruption."""
     if task == "pause_handling":
         return [
             (seconds(start), seconds(end))
@@ -154,7 +219,8 @@ def reference_times(task: Task, annotation: JsonValue) -> Reference:
     elif task == "turn_taking":
         return seconds(annotation[0]["timestamp"][0])
     else:
-        return seconds(annotation[0]["timestamp"][1])
+        onset_s, end_s = annotation[0]["timestamp"]
+        return (seconds(onset_s), seconds(end_s))
 
 
 def timestamp_problems(
@@ -189,36 +255,31 @@ def timestamp_problems(
     elif task == "turn_taking":
         problems += outside("turn end E", [reference])
     else:
-        problems += outside("interruption end R", [reference])
+        onset_s, end_s = reference
+        problems += outside("interruption bound", [onset_s, end_s])
+        problems += (
+            [f"interruption [{onset_s}, {end_s}] ends before it starts"]
+            if end_s < onset_s
+            else []
+        )
         # note (luojiaxuan): reference-asr cuts the audio at R and adds R back to
         # every word, so an earlier word start means a broken transcript.
         problems += [
-            f"word start {start} is before the interruption end R {reference}"
+            f"word start {start} is before the interruption end R {end_s}"
             for start, _ in spans
-            if start < reference
+            if start < end_s
         ]
     return problems
 
 
-def score_sample(
-    task: Task, spans: list[Span], reference: Reference, window_s: float
-) -> dict[str, JsonValue]:
-    starts = [start for start, _ in spans]
-    if task == "pause_handling":
-        return pause_sample(spans, reference, window_s)
-    elif task == "turn_taking":
-        return turn_taking_sample(starts, reference, window_s)
-    else:
-        return response_sample(starts, reference, window_s)
-
-
 def score_eligible(
-    tree: Path, row: dict[str, JsonValue], task: Task
+    tree: Path, row: dict[str, JsonValue], task: Task, vad: torch.jit.ScriptModule
 ) -> dict[str, JsonValue]:
     """Per-sample quantities; stops on a timestamp that timestamp_problems rejects."""
     sample_dir = tree / row["sample_id"]
     chunks = read_json(sample_dir / "output.json")["chunks"]
     spans = word_spans(chunks)
+    starts = [start for start, _ in spans]
     reference = reference_times(task, read_json(sample_dir / ANNOTATION_FILES[task]))
     window_s = seconds(row["window"]["T_s"])
     problems = timestamp_problems(task, spans, reference, window_s)
@@ -226,10 +287,17 @@ def score_eligible(
         raise SystemExit(f"{row['sample_id']}: {'; '.join(problems)}")
     else:
         pass
+    if task == "pause_handling":
+        quantities = pause_sample(spans, reference, window_s)
+    elif task == "turn_taking":
+        quantities = turn_taking_sample(starts, reference, window_s)
+    else:
+        speech = speech_segments(sample_dir / "output.wav", vad)
+        quantities = interruption_sample(starts, speech, reference, window_s)
     return {
         "words": len(chunks),
         "null_end_words": sum(chunk["timestamp"][1] is None for chunk in chunks),
-        **score_sample(task, spans, reference, window_s),
+        **quantities,
     }
 
 
@@ -254,10 +322,11 @@ def wilson(count: int, n: int) -> list[float] | None:
 
 
 def rate(flags: list[bool], selected: int) -> dict[str, JsonValue]:
-    """Share of the eligible samples (one flag each) out of `selected` samples.
+    """Share of the scored samples (one flag each) out of `selected` samples.
 
-    selected_bounds is the share over all selected samples with every
-    ineligible outcome taken as False, then as True.
+    The selected - n samples beyond the flags have an unknown outcome, and
+    selected_bounds is the share over all `selected` samples with each of them
+    taken as False, then as True.
     """
     count, n = sum(flags), len(flags)
     return {
@@ -265,7 +334,9 @@ def rate(flags: list[bool], selected: int) -> dict[str, JsonValue]:
         "n": n,
         "value": count / n if n else None,
         "ci95": wilson(count, n),
-        "selected_bounds": [count / selected, (count + selected - n) / selected],
+        "selected_bounds": (
+            [count / selected, (count + selected - n) / selected] if selected else None
+        ),
     }
 
 
@@ -359,23 +430,34 @@ def subset_metrics(
         }
     else:
         pass
-    latencies = [row["latency_s"] for row in rows]
-    metrics = (
-        {
+    if task == "turn_taking":
+        scored = rows
+        metrics = {
             "early_start_rate": rate(
                 [row["outcome"] == "early_start" for row in rows], selected
             )
         }
-        if task == "turn_taking"
-        else {}
-    )
+    else:
+        # note (luojiaxuan): how a not_exercised sample would have handled an
+        # interruption is unknown, so it counts as an unknown outcome in the
+        # selected bounds, like an ineligible one.
+        scored = [row for row in rows if row["outcome"] != "not_exercised"]
+        metrics = {
+            "exercised_rate": rate(
+                [row["outcome"] != "not_exercised" for row in rows], selected
+            ),
+            "speaking_at_end_rate": rate(
+                [row["outcome"] == "speaking_at_end" for row in scored], selected
+            ),
+        }
+    latencies = [row["latency_s"] for row in scored]
     for within_s in RESPONSE_WITHIN_S:
         metrics[f"response_rate_{within_s}s"] = rate(
             [latency is not None and latency <= within_s for latency in latencies],
             selected,
         )
     metrics["no_response_rate"] = rate(
-        [row["outcome"] == "no_response" for row in rows], selected
+        [row["outcome"] == "no_response" for row in scored], selected
     )
     metrics["response_latency_s"] = latency_summary(
         [math.inf if latency is None else latency for latency in latencies]
@@ -396,6 +478,7 @@ def score_tree(tree: Path) -> dict[str, JsonValue]:
     else:
         pass
     subsets, samples = {}, []
+    vad = load_silero_vad()
     for subset in SUBSETS:
         task = SUBSET_TASKS[subset]
         members = [row for row in manifest["samples"] if row["subset"] == subset]
@@ -414,10 +497,15 @@ def score_tree(tree: Path) -> dict[str, JsonValue]:
         recorded = (
             asr["subsets"][subset]["transcripts"] if subset in asr["subsets"] else {}
         )
+        checked_files = (
+            [annotation_name, "output.wav"]
+            if task == "user_interruption"
+            else [annotation_name]
+        )
         if transcripts != recorded or any(
-            file_sha256(tree / row["sample_id"] / annotation_name)
-            != row["files"][annotation_name]
+            file_sha256(tree / row["sample_id"] / name) != row["files"][name]
             for row in eligible
+            for name in checked_files
         ):
             raise SystemExit(f"{tree / subset} differs from manifest.json or asr.json")
         else:
@@ -431,7 +519,7 @@ def score_tree(tree: Path) -> dict[str, JsonValue]:
                 "eligible": row["eligible"],
             }
             if row["eligible"]:
-                sample.update(score_eligible(tree, row, task))
+                sample.update(score_eligible(tree, row, task, vad))
                 scored.append(sample)
             else:
                 sample["reasons"] = row["reasons"]
@@ -467,6 +555,12 @@ def score_tree(tree: Path) -> dict[str, JsonValue]:
         "definitions_version": DEFINITIONS_VERSION,
         "manifest_sha256": file_sha256(manifest_path),
         "asr_sha256": file_sha256(asr_path),
+        "vad": {
+            "package": "silero-vad",
+            "version": importlib.metadata.version("silero-vad"),
+            "model": "load_silero_vad() default, as eval_backchannel.py",
+            "config": SILERO_VAD_CONFIG,
+        },
         "intervals": {
             "confidence": 0.95,
             "sample_rates": "Wilson score",

@@ -1,20 +1,21 @@
 # Full-Duplex-Bench v1.0 unified metrics
 
-`unified-score` scores a Full-Duplex-Bench v1.0 reference tree with turn-taking metrics that do not depend on how a system decides to speak. It reads the same Parakeet transcripts and dataset annotations as the official evaluator, so native full-duplex, turn-based and cascade systems are scored by the same rules. It needs no GPU, LLM or network access.
+`unified-score` scores a Full-Duplex-Bench v1.0 reference tree with turn-taking metrics that do not depend on how a system decides to speak. It reads the same Parakeet transcripts and dataset annotations as the official evaluator, and for user interruption it also runs Silero VAD on the exported audio, so native full-duplex, turn-based and cascade systems are scored by the same rules. It needs no GPU, LLM or network access.
 
 ## Why the official numbers are only a reference
 
-`reference-evaluate` runs the pinned official evaluator unchanged, and its numbers stay in the report as the reference column. Three of its rules measure something other than their names suggest:
+`reference-evaluate` runs the pinned official evaluator unchanged, and its numbers stay in the report as the reference column. Four of its rules measure something other than their names suggest:
 
 1. **Talking over the user gives the best latency.** `eval_smooth_turn_taking.py` sets a negative latency, a reply that starts before the user's turn ends, to 0. On one 119-sample capture of a native full-duplex model, 39 latencies were clamped this way.
 2. **Pause takeover does not look at the pauses.** `eval_pause_handling.py` never reads `pause.json`. It counts a takeover in every nonempty transcript of the whole window except one that both spans less than 1 s and has at most 3 words. Speech before the user's first pause counts, and an output of at most 3 words within 1 s, such as a takeover that the user's resumed speech cuts off, does not. On Candor pause handling, the official rule found a takeover in 30 samples of a turn-based system that answers after 500 ms of silence, while that system's transcript contained a word onset at or after the first annotated pause in 67.
 3. **Non-responders leave the latency average.** Latency is averaged only over samples that took the turn, so a model too slow to answer inside the window drops out and can look faster.
+4. **Not every interruption interrupts.** `eval_user_interruption.py` scores every sample, including those where the model had already stopped talking before the user cut in. On one 200-sample capture of a native full-duplex model, the model was silent at the interruption onset in 87, and the official takeover rate, latency and judge rating still score its replies there as responses to an interruption.
 
 ## Inputs and checks
 
 Run it on a tree written by `reference-export` and transcribed by `reference-asr` (see the [runbook](full_duplex_bench.md)). All times are seconds on the input window `[0, T]`, where T is the input length recorded in `manifest.json`. Each transcript word has a start and an end from `output.json`; a word with a null end counts as zero-length at its start. Times are rounded to the microsecond before any comparison. This removes float noise in the files (an annotation at 6.32000000000005 against a word at 6.32), not ASR alignment error.
 
-Loading a sample checks its times and stops with the sample id and the problem if any check fails: every word starts in `[0, T]`; the reference times E and R defined below lie in `[0, T]`; `pause.json` lists at least one pause, each `[a, b]` with `a <= b` inside `[0, T]`, sorted and not overlapping; and no interruption word starts before R.
+Loading a sample checks its times and stops with the sample id and the problem if any check fails: every word starts in `[0, T]`; the reference times E, S and R defined below lie in `[0, T]` with `S <= R`; `pause.json` lists at least one pause, each `[a, b]` with `a <= b` inside `[0, T]`, sorted and not overlapping; and no interruption word starts before R.
 
 These annotations do not reliably label backchannels versus aborted turn starts; we therefore count every word onset, including a one-word "yeah". The rules are a strict word-timing proxy that also penalizes acknowledgments a listener might accept.
 
@@ -61,13 +62,36 @@ Let F(t) be the share of samples with a `response` latency of at most t. Then `r
 
 ### User interruption
 
-Subset `synthetic_user_interruption`. The reference time R is `interrupt.json[0].timestamp[1]`, the end of the user's interruption. `reference-asr` cuts the audio at R before transcribing, so no word starts before R and there is no `early_start` outcome. The other metrics are defined as for turn-taking with R in place of E.
+Subset `synthetic_user_interruption`. `interrupt.json[0].timestamp` gives the onset S and the end R of the user's interruption. `reference-asr` cuts the audio at R before transcribing, so the transcript holds only words from R on and cannot show whether the model stopped. Silero VAD on the full `output.wav` supplies that (see [Speech detection](#speech-detection)). Each sample has exactly one outcome:
 
-A model still talking at R is transcribed from R onward and can receive near-zero latency credit, so these columns cannot tell talking through the interruption from a fast reply and do not rank systems on their own.
+- `not_exercised`: the model is not speaking at S, so nothing was interrupted.
+- `speaking_at_end`: the model is speaking at R. It had not yielded when the user finished, and its words after R may continue the interrupted answer, so the sample has no latency. A model that stopped and then started a reply before R lands here too, the interruption counterpart of an early start.
+- `response`: speaking at S, silent at R, and a word starts at or after R. The latency is the start of the first word minus R.
+- `no_response`: speaking at S, silent at R, and no word after R.
+
+| Metric | Definition | Better |
+|---|---|---|
+| `exercised_rate` | Eligible samples where the model is speaking at S | Context |
+| `speaking_at_end_rate` | Exercised samples that are `speaking_at_end` | Lower |
+| `response_rate_1s`, `_2s`, `_5s` | Exercised samples with a `response` within 1, 2 or 5 s | Higher |
+| `no_response_rate` | Exercised samples that are `no_response` | Lower |
+| `response_latency_s` | Median with its interval, and p90, over exercised samples, as for turn-taking | Lower |
+
+Every metric except `exercised_rate` is over exercised samples. Whether a sample is exercised depends on the system as well as the dataset, because S is fixed in input time: a model that answers briefly or late is silent at S more often. A `not_exercised` sample therefore counts as an unknown outcome in `selected_bounds`, like an ineligible one. A model silent at every S gets bounds of `[0, 1]` and is visibly unmeasured, and a terse model's lower bound drops. Read `exercised_rate` and the bounds with every interruption number.
 
 ### Backchannel
 
-`icc_backchannel` has no unified metric; use the official frequency and JSD.
+`icc_backchannel` has no unified metric; the official frequency and JSD are the reference. `eval_backchannel.py` has known problems. Fixing them needs new definitions with their own validation, so they are only listed here:
+
+- It adds every VAD segment up to 3 s to the backchannel list, including the ones it classified as a takeover.
+- Its takeover flag is overwritten by each segment, and the loop stops at the first segment over 3 s, which also drops the later segments from frequency and timing.
+- The timing score is SciPy's Jensen-Shannon distance with the natural log, which is at most about 0.83, while a sample without backchannels scores 1. The distance also moves with how many backchannels there are, not only with when they occur.
+
+### Speech detection
+
+The scorer runs the Silero model that `load_silero_vad()` loads, with the settings the official backchannel evaluator uses: threshold 0.5, minimum speech 250 ms, minimum silence 100 ms and 30 ms of padding. The model counts as speaking at a time that falls inside a detected segment. A pause longer than 100 ms ends a segment, so a model pausing between sentences exactly at S counts as `not_exercised`. On one 200-sample capture of a native full-duplex model, thresholds from 0.3 to 0.7 and minimum silences from 50 to 500 ms moved `not_exercised` between 84 and 91 samples, `speaking_at_end` between 4 and 5, and `response_rate_2s` between 0.946 and 0.957.
+
+The audio is the received output played in order. For the turn-based realtime protocol the playout drops queued audio at the output-buffer clear event; native full-duplex traces have no such event, so audio a system has already sent plays out, and the outcome describes the system as delivered.
 
 ### Reading them together
 
@@ -75,12 +99,12 @@ Silence scores perfectly on pause handling, and one canned word right after E co
 
 ## Denominators and intervals
 
-- Sample shares and latency quantiles are over the subset's eligible samples: those whose capture passed the `reference-export` checks (input pacing, an error-free observation window, dataset hashes that match the run). The pooled ratios divide by the pauses and the pause seconds of the eligible samples. `declared` is the full subset size.
+- Sample shares and latency quantiles are over the subset's eligible samples, and for interruption over its exercised ones. Eligible samples are those whose capture passed the `reference-export` checks (input pacing, an error-free observation window, dataset hashes that match the run). The pooled ratios divide by the pauses and the pause seconds of the eligible samples. `declared` is the full subset size.
 - Ineligible samples are counted under `counts`, never dropped silently. A sample can have several reasons, so the counts in `counts.ineligible_reasons` need not sum to `ineligible`.
-- An ineligible sample's outcome is unknown, and a capture failure can depend on the system. Every sample share therefore also has `selected_bounds`, `[count / selected, (count + ineligible) / selected]`: its value over all selected samples with each unknown outcome taken as no, then as yes. `coverage` is eligible over selected for each subset.
+- An ineligible sample's outcome is unknown, and a capture failure can depend on the system. Every sample share therefore also has `selected_bounds`, `[count / selected, (count + unknown) / selected]`: its value over all selected samples with each unknown outcome taken as no, then as yes. The unknown samples are the ineligible ones, plus the `not_exercised` ones for interruption. `coverage` is eligible over selected for each subset.
 - A share of samples has a 95% Wilson interval, whose endpoints are exactly 0 at a count of 0 and exactly 1 at a count of n. The pooled ratios and the median latency have a 95% percentile bootstrap interval that resamples whole samples (2000 resamples, seed 0), because the pauses of one sample are not independent. Each resample's median and the interval endpoints use the same quantile rule as above. A resample with no pause time has no `intrusion_s_per_pause_s` and is skipped. The output is deterministic.
 - `min_observable_s` is the shortest time from the reference to T. T is the dataset input length, so every system has the same horizon on a sample. A response after T is not observed, so `response_rate_ks` is a lower bound when `min_observable_s` is below k. Candor turn-taking windows end about 5 s after E, so there `response_rate_5s` is close to the share that responded inside the window.
-- The intervals cover dataset sampling only, not repeated generations or ASR errors. To compare two systems, pair their rows in `unified-samples.jsonl` by `sample_id` over the samples eligible in both. Pairing does not remove selection bias, so report coverage and the selected bounds as well.
+- The intervals cover dataset sampling only, not repeated generations or ASR errors. To compare two systems, pair their rows in `unified-samples.jsonl` by `sample_id` over the samples eligible in both, and for interruption exercised in both. Pairing does not remove selection bias, so report coverage, `exercised_rate` and the selected bounds as well.
 
 ## Run
 
@@ -88,16 +112,16 @@ Silence scores perfectly on pause handling, and one canned word right after E co
 python -m benchmarks.eval.benchmark_duplex_v10 unified-score --tree "$OUT/reference"
 ```
 
-It refuses a tree without `asr.json`, stops if the transcript or annotation of an eligible sample differs from `asr.json` or `manifest.json`, and stops on a time that fails the checks above. It writes:
+It refuses a tree without `asr.json`, stops if the transcript or annotation of an eligible sample, or the `output.wav` of an interruption sample, differs from `asr.json` or `manifest.json`, and stops on a time that fails the checks above. It writes:
 
-- `unified.json`: per subset, the counts, `coverage` and every metric with its interval, plus `selected_bounds` for sample shares and `min_observable_s` for turn-taking and interruption. Only the median latency has an interval, not p90. At the top are the definitions version (`fdb-v1.0-unified-3`) and the hashes of `manifest.json` and `asr.json`.
-- `unified-samples.jsonl`: one row per selected sample of the four scored subsets (`icc_backchannel` has no rows) with every per-sample quantity, including the pause flags `pause_intrusion`, `inside_pause_onset`, `pre_pause_speech`, `carry_in` and `any_speech`. Ineligible rows keep their sample id, subset and task and add their reasons.
+- `unified.json`: per subset, the counts, `coverage` and every metric with its interval, plus `selected_bounds` for sample shares and `min_observable_s` for turn-taking and interruption. Only the median latency has an interval, not p90. At the top are the definitions version (`fdb-v1.0-unified-4`), the hashes of `manifest.json` and `asr.json`, and the silero-vad version and settings.
+- `unified-samples.jsonl`: one row per selected sample of the four scored subsets (`icc_backchannel` has no rows) with every per-sample quantity, including the pause flags `pause_intrusion`, `inside_pause_onset`, `pre_pause_speech`, `carry_in` and `any_speech`, and for interruption the outcome, S and `speech_before_onset`. Ineligible rows keep their sample id, subset and task and add their reasons.
 
 It prints each subset's metrics as value, interval and count, with the bounds over all selected samples for each share. When `reference-evaluate` has written `summary.json` from the same `manifest.json` and `asr.json`, its numbers are printed below them as the reference column; if either hash differs, the column is left out and a line says which input changed. Interruption numbers rated by a judge other than the official one are labeled with that judge's model instead of `official`. `summary.json` is never written or used for scoring. Rerunning on the same tree writes the same bytes.
 
 ## Not measured
 
-- **Stopping after an interruption.** Whether and when the model stops talking needs a transcript of the whole window, and the interruption transcript starts at R.
+- **When the model stops after an interruption.** The outcome says whether the model was silent at R, not when it stopped or what it said before R.
 - **The end of the user's speech in a pause sample.** The window is treated as a non-yielding user turn. The official evaluator reads output chunks, not a user-end annotation, so it does not establish the true turn end either. A reply that starts in a short trailing silence counts as an intrusion, so not every counted onset is premature.
 - **Relevance of a reply.** Neither these metrics nor the official turn-taking score check that a reply answers the user. Only the official interruption judge rating covers it, and that rating depends on the judge model the run configured.
 - **ASR errors.** A missed or invented word changes the metrics it falls in. All systems share the pinned Parakeet checkpoint, which does not mean they share the same recognition error.
