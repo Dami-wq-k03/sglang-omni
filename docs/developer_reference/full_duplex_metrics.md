@@ -96,7 +96,7 @@ Every metric except `exercised_rate` is over exercised samples. Whether a sample
 
 The scorer runs the Silero model that `load_silero_vad()` loads, with Silero's default threshold 0.5, minimum speech 250 ms and minimum silence 100 ms, and no padding. The default 30 ms of padding widens each segment on both sides and can move a reply that starts just after R to before it. `output.wav` must hold exactly T seconds of samples. Segments come from the whole file, so near S they can depend on audio after S. A pause longer than 100 ms ends a segment, so a model pausing between sentences exactly at S counts as `not_exercised`. On one 200-sample capture of a native full-duplex model, thresholds from 0.3 to 0.7 and minimum silences from 50 to 500 ms moved `not_exercised` between 85 and 95 samples, `response_rate_2s` between 0.952 and 0.957 and the median `stop_latency_s` between 1.04 and 1.27 s, and left `speaking_at_end` at 4. `restart_rate` ran from 0.05 to 0.27, because a shorter minimum silence splits speech into more segments, so it is a diagnostic and does not rank systems.
 
-The audio is the received output played in order. For the turn-based realtime protocol the playout drops queued audio at the output-buffer clear event; native full-duplex traces have no such event, so audio a system has already sent plays out, and the outcome describes the system as delivered.
+The audio is the received output played in order. For the turn-based realtime protocol the playout drops queued audio when the server reports that the user started speaking while interruptions are on; native full-duplex traces have no such event, so audio a system has already sent plays out, and the outcome describes the system as delivered.
 
 ### Reading them together
 
