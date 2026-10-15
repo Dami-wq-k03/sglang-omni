@@ -180,8 +180,8 @@ class MiniMaxMusic3AcousticDecoder:
             "breakable_cuda_graph", breakable_cuda_graph
         )
         self.breakable_cuda_graph = False
-        self._serial_offload = _boolean("serial_offload", serial_offload)
-        if self._serial_offload:
+        self.serial_offload_enabled = boolean("serial_offload", serial_offload)
+        if self.serial_offload_enabled:
             # Moving the module between CPU and GPU each request invalidates
             # both torch.compile's device-bound guards and any CUDA graph's
             # captured (now stale) memory addresses, so neither is safe here.
@@ -192,6 +192,8 @@ class MiniMaxMusic3AcousticDecoder:
                     "moves that --stage-offload-components ar,dit performs)"
                 )
                 self.compile_acoustic = False
+            else:
+                pass
             if self.breakable_cuda_graph_requested:
                 logger.warning(
                     "MiniMax Music 3 serial offload disables breakable_cuda_graph "
@@ -199,11 +201,17 @@ class MiniMaxMusic3AcousticDecoder:
                     "relocated once the module moves off the GPU)"
                 )
                 self.breakable_cuda_graph_requested = False
+            else:
+                pass
+        else:
+            pass
         # Serial offload parks DIT/DAV on the host between requests, so load
         # them straight there. Staging the checkpoint through the GPU would
         # peak with AR and DIT/DAV both fully resident, which is precisely the
         # peak this mode exists to avoid.
-        self._load_device = torch.device("cpu") if self._serial_offload else self.device
+        self.load_device = (
+            torch.device("cpu") if self.serial_offload_enabled else self.device
+        )
         if self.cache_dit and self.breakable_cuda_graph_requested:
             raise ValueError(
                 "MiniMax Music 3 cache_dit and breakable_cuda_graph cannot be enabled together"
@@ -246,28 +254,34 @@ class MiniMaxMusic3AcousticDecoder:
         logger.info(
             f"MiniMax Music 3 acoustic runtime dit_steps={self.dit_steps} dit_cfg_scale={self.dit_cfg_scale:.3f} attention_backend={self.attention_backend} cache_dit={self.cache_dit} compile_acoustic={self.compile_acoustic} breakable_cuda_graph={self.breakable_cuda_graph} breakable_cuda_graph_requested={self.breakable_cuda_graph_requested}"
         )
-        self._residency: StageResidency | None = None
-        if self._serial_offload:
-            self._residency = StageResidency(
+        self.residency: StageResidency | None = None
+        if self.serial_offload_enabled:
+            self.residency = StageResidency(
                 {"dit": self.dit, "dav": self.dav},
                 self.device,
                 resident=False,
                 label="dit/dav",
             )
+        else:
+            pass
 
     @property
     def serial_offload(self) -> bool:
-        return self._serial_offload
+        return self.serial_offload_enabled
 
     def ensure_gpu_resident(self) -> None:
         """Restore DIT/DAV to the GPU; a cheap no-op once already resident."""
-        if self._residency is not None:
-            self._residency.wake()
+        if self.residency is not None:
+            self.residency.wake()
+        else:
+            pass
 
     def release_residency(self) -> None:
         """Drop the DIT/DAV GPU replica; a no-op once already offloaded."""
-        if self._residency is not None:
-            self._residency.sleep()
+        if self.residency is not None:
+            self.residency.sleep()
+        else:
+            pass
 
     def build_dit(
         self,
@@ -282,9 +296,9 @@ class MiniMaxMusic3AcousticDecoder:
         from .dit import MiniMaxMusic3DIT
 
         logger.info(
-            f"Loading MiniMax Music 3 PyTorch DIT from {dit_path} on device={self._load_device} dtype={self.dtype}"
+            f"Loading MiniMax Music 3 PyTorch DIT from {dit_path} on device={self.load_device} dtype={self.dtype}"
         )
-        state = load_torch_state(dit_path, device=self._load_device)
+        state = load_torch_state(dit_path, device=self.load_device)
         logger.info(
             f"MiniMax Music 3 DIT checkpoint variant=FM8/ELMo condition_hidden=32768 state_keys={len(state)}"
         )
@@ -328,7 +342,7 @@ class MiniMaxMusic3AcousticDecoder:
     def build_dav(self, dav_path: str) -> int:
         """Load the DAV decoder and return how many weight norms were folded."""
         logger.info(f"Loading MiniMax Music 3 DAV from {dav_path}")
-        state = load_torch_state(dav_path, device=self._load_device)
+        state = load_torch_state(dav_path, device=self.load_device)
         with torch.device("meta"):
             self.dav = MiniMaxMusic3DAV()
         self.dav.load_state_dict(select_decoder_state(state), strict=True, assign=True)

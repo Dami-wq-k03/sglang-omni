@@ -16,7 +16,7 @@ from sglang_omni.models.minimax_music3.serial_offload import (
 )
 
 
-def _registered() -> SerialOffloadCoordinator:
+def registered_coordinator() -> SerialOffloadCoordinator:
     coordinator = SerialOffloadCoordinator()
     coordinator.register_ar(torch.nn.Linear(2, 2), torch.device("cpu"))
     return coordinator
@@ -37,14 +37,14 @@ def test_disabled_coordinator_never_blocks_admission_and_handoffs_are_noops() ->
 
 
 def test_register_ar_enables_the_coordinator_and_starts_ar_active() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
 
     assert coordinator.enabled is True
     assert coordinator.try_acquire_ar("req-1") is True
 
 
 def test_begin_dit_handoff_moves_ar_off_the_gpu_and_blocks_admission() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-1")
 
     coordinator.begin_dit_handoff("req-1")
@@ -53,7 +53,7 @@ def test_begin_dit_handoff_moves_ar_off_the_gpu_and_blocks_admission() -> None:
 
 
 def test_end_dit_handoff_restores_ar_and_reopens_admission() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-1")
     coordinator.begin_dit_handoff("req-1")
 
@@ -63,7 +63,7 @@ def test_end_dit_handoff_restores_ar_and_reopens_admission() -> None:
 
 
 def test_handoff_calls_are_idempotent() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-1")
 
     coordinator.begin_dit_handoff("req-1")
@@ -76,7 +76,7 @@ def test_handoff_calls_are_idempotent() -> None:
 
 
 def test_second_request_cannot_enter_the_first_request_lifecycle() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-1")
     assert coordinator.try_acquire_ar("req-2") is False
     coordinator.begin_dit_handoff("req-1")
@@ -86,7 +86,7 @@ def test_second_request_cannot_enter_the_first_request_lifecycle() -> None:
 
 
 def test_end_for_a_request_that_never_handed_off_does_not_wake_ar() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-1")
     coordinator.begin_dit_handoff("req-1")
 
@@ -96,7 +96,7 @@ def test_end_for_a_request_that_never_handed_off_does_not_wake_ar() -> None:
 
 
 def test_late_terminal_for_old_request_does_not_release_new_owner() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-old")
     coordinator.begin_dit_handoff("req-old")
     coordinator.end_dit_handoff("req-old")
@@ -113,7 +113,7 @@ def test_late_terminal_for_old_request_does_not_release_new_owner() -> None:
 
 
 def test_acoustic_release_failure_fails_closed() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-1")
     coordinator.begin_dit_handoff("req-1")
 
@@ -127,7 +127,7 @@ def test_acoustic_release_failure_fails_closed() -> None:
 
 
 def test_cancel_before_handoff_releases_owner() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-1")
 
     coordinator.cancel_ar("req-1")
@@ -138,11 +138,11 @@ def test_cancel_before_handoff_releases_owner() -> None:
 def test_a_stalled_handoff_is_reported_once_and_never_force_woken(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-1")
     coordinator.begin_dit_handoff("req-1")
     # Backdate the pause past the reporting threshold.
-    coordinator._paused_at -= STALL_REPORT_SECONDS + 1.0
+    coordinator.paused_at_seconds -= STALL_REPORT_SECONDS + 1.0
 
     with caplog.at_level("ERROR"):
         assert coordinator.try_acquire_ar("req-2") is False
@@ -164,14 +164,14 @@ def test_ownership_without_cuda_residency_supports_mlx() -> None:
 
 
 def test_transition_failure_fails_closed() -> None:
-    coordinator = _registered()
+    coordinator = registered_coordinator()
     assert coordinator.try_acquire_ar("req-1")
-    assert coordinator._ar is not None
+    assert coordinator.ar_residency is not None
 
     def fail_sleep() -> None:
         raise OSError("copy failed")
 
-    coordinator._ar.sleep = fail_sleep
+    coordinator.ar_residency.sleep = fail_sleep
     with pytest.raises(OSError, match="copy failed"):
         coordinator.begin_dit_handoff("req-1")
     with pytest.raises(RuntimeError, match="transition failed"):
@@ -221,7 +221,7 @@ def test_builder_registers_complete_ar_model_with_coordinator(
     )
 
     coordinator = SerialOffloadCoordinator()
-    monkeypatch.setattr(serial_offload, "_COORDINATOR", coordinator)
+    monkeypatch.setattr(serial_offload, "COORDINATOR", coordinator)
     model = torch.nn.Module()
     model.backbone = torch.nn.Linear(2, 2)
     model.audio_decoder = torch.nn.Linear(2, 2)
@@ -231,8 +231,8 @@ def test_builder_registers_complete_ar_model_with_coordinator(
     builder.setup_runtime_resources(model, SimpleNamespace())
 
     assert coordinator.enabled
-    assert coordinator._ar is not None
-    assert coordinator._ar._modules == {"ar": model}
+    assert coordinator.ar_residency is not None
+    assert coordinator.ar_residency.modules == {"ar": model}
     assert coordinator.try_acquire_ar("request")
 
 
@@ -245,6 +245,7 @@ def test_cuda_factory_forwards_serial_offload_to_builder(
 
     class Builder:
         max_running_requests = 1
+        device = "cuda:0"
 
         def __init__(self, **kwargs):
             observed.update(init=kwargs)
@@ -253,17 +254,20 @@ def test_cuda_factory_forwards_serial_offload_to_builder(
             observed.update(model_path=model_path, build=kwargs)
             return "scheduler"
 
-    monkeypatch.setattr(stages, "_use_mlx_backend", lambda: False)
+    monkeypatch.setattr(stages, "use_mlx_backend", lambda: False)
     monkeypatch.setattr(engine_builder, "MiniMaxMusic3EngineBuilder", Builder)
 
     result = stages.create_ar_executor(
         "checkpoint",
-        device="cuda:0",
+        device="cuda",
+        gpu_id=0,
         enable_serial_offload=True,
     )
 
     assert result == "scheduler"
     assert observed["init"]["enable_serial_offload"] is True
+    assert observed["build"]["device"] == "cuda"
+    assert observed["build"]["gpu_id"] == 0
 
 
 def test_scheduler_admission_claims_only_one_logical_request(
@@ -286,7 +290,7 @@ def test_scheduler_admission_claims_only_one_logical_request(
         SimpleNamespace(rid="req-2-cfg", origin_input_ids=[1]),
     ]
 
-    limit = MiniMaxMusic3Scheduler._pair_admission_limit(
+    limit = MiniMaxMusic3Scheduler.pair_admission_limit(
         scheduler, queue, SimpleNamespace(reqs=[])
     )
 
@@ -295,16 +299,14 @@ def test_scheduler_admission_claims_only_one_logical_request(
 
 
 def test_ar_reset_releases_owner_before_handoff() -> None:
-    from sglang_omni.models.minimax_music3.model_runner import (
-        MiniMaxMusic3ModelRunner,
-    )
+    from sglang_omni.models.minimax_music3.model_runner import MiniMaxMusic3ModelRunner
 
     coordinator = SerialOffloadCoordinator()
     coordinator.enable()
     assert coordinator.try_acquire_ar("req-1")
     runner = object.__new__(MiniMaxMusic3ModelRunner)
-    runner._request_data = {"req-1": SimpleNamespace(ar_state=object())}
-    runner._serial_offload = coordinator
+    runner.request_data = {"req-1": SimpleNamespace(ar_state=object())}
+    runner.serial_offload = coordinator
 
     runner.reset_request("req-1")
 
@@ -362,11 +364,11 @@ def test_residency_reuses_one_host_copy_instead_of_recopying_each_sleep() -> Non
     residency = StageResidency({"module": module}, torch.device("cpu"))
 
     residency.sleep()
-    snapshot = residency._host[("module", "weight")]
+    snapshot = residency.host_weights[("module", "weight")]
     residency.wake()
     residency.sleep()
 
-    assert residency._host[("module", "weight")] is snapshot
+    assert residency.host_weights[("module", "weight")] is snapshot
 
 
 def test_a_host_built_module_is_asleep_and_never_snapshots_from_the_gpu() -> None:
@@ -374,8 +376,11 @@ def test_a_host_built_module_is_asleep_and_never_snapshots_from_the_gpu() -> Non
     residency = StageResidency({"module": module}, torch.device("cpu"), resident=False)
 
     assert residency.resident is False
-    assert residency._host[("module", "weight")] is not module.weight
-    assert residency._host[("module", "weight")].data_ptr() == module.weight.data_ptr()
+    assert residency.host_weights[("module", "weight")] is not module.weight
+    assert (
+        residency.host_weights[("module", "weight")].data_ptr()
+        == module.weight.data_ptr()
+    )
 
     residency.wake()
     assert residency.resident is True
@@ -418,7 +423,7 @@ def test_host_built_residency_keeps_canonical_copy_on_cpu() -> None:
     model = torch.nn.Linear(4, 4)
     expected = model.weight.detach().clone()
     residency = StageResidency({"module": model}, device, resident=False)
-    host_weight = residency._host[("module", "weight")]
+    host_weight = residency.host_weights[("module", "weight")]
 
     residency.wake()
     assert model.weight.device == device

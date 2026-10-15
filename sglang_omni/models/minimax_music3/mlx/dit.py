@@ -13,7 +13,7 @@ import mlx.nn as nn
 from .config import ModelConfig
 
 
-def _apply_partial_rotary(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
+def apply_partial_rotary(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
     rotary_dim = cos.shape[-1]
     cos = cos[:, None, :].astype(x.dtype)
     sin = sin[:, None, :].astype(x.dtype)
@@ -60,8 +60,8 @@ class DiTAttention(nn.Module):
         q = self.to_q(x).reshape(batch, length, self.heads, self.head_dim)
         k = self.to_k(x).reshape(batch, length, self.heads, self.head_dim)
         v = self.to_v(x).reshape(batch, length, self.heads, self.head_dim)
-        q = _apply_partial_rotary(q, cos, sin).transpose(0, 2, 1, 3)
-        k = _apply_partial_rotary(k, cos, sin).transpose(0, 2, 1, 3)
+        q = apply_partial_rotary(q, cos, sin).transpose(0, 2, 1, 3)
+        k = apply_partial_rotary(k, cos, sin).transpose(0, 2, 1, 3)
         v = v.transpose(0, 2, 1, 3)
         y = mx.fast.scaled_dot_product_attention(
             q, k, v, scale=1.0 / math.sqrt(self.head_dim)
@@ -112,7 +112,7 @@ class FlowMatchingTransformer(nn.Module):
             bias=False,
         )
 
-    def _rotary(self, length: int) -> tuple[mx.array, mx.array]:
+    def rotary(self, length: int) -> tuple[mx.array, mx.array]:
         inv_freq = 1.0 / (
             10_000.0
             ** (mx.arange(0, self.rotary_dim, 2).astype(mx.float32) / self.rotary_dim)
@@ -135,7 +135,7 @@ class FlowMatchingTransformer(nn.Module):
         time_embedding = self.time_embed(self.time_proj(timestep))
         x = self.proj_in(x)
         x = mx.concatenate([time_embedding[:, None, :], x], axis=1)
-        cos, sin = self._rotary(x.shape[1])
+        cos, sin = self.rotary(x.shape[1])
         for block in self.transformer_blocks:
             x = block(x, cos, sin)
         x = self.proj_out(x[:, 1:])

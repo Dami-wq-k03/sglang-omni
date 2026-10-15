@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_AR_CONCURRENCY = int(os.environ.get("MINIMAX_MUSIC3_AR_CONCURRENCY", "16"))
 
 
-def _use_mlx_backend() -> bool:
+def use_mlx_backend() -> bool:
     from sglang.srt.hardware_backend.mlx.runtime import use_mlx
 
     return bool(use_mlx())
@@ -54,9 +54,11 @@ def create_ar_executor(
     mlx_model_revision: str | None = None,
     enable_serial_offload: bool = False,
 ):
-    if _use_mlx_backend():
+    if use_mlx_backend():
         if not current_platform.is_mps():
             raise RuntimeError("SGLANG_USE_MLX=1 requires the Apple Metal platform")
+        else:
+            pass
         from .mlx.ar_scheduler import MiniMaxMusic3MlxARScheduler
 
         scheduler = MiniMaxMusic3MlxARScheduler(
@@ -78,8 +80,8 @@ def create_ar_executor(
         pass
     from sglang_omni.utils.device import resolve_concrete_device
 
-    device = str(resolve_concrete_device(device, gpu_id))
-    if enable_serial_offload and torch.device(device).type != "cuda":
+    concrete_device = resolve_concrete_device(device, gpu_id)
+    if enable_serial_offload and concrete_device.type != "cuda":
         raise RuntimeError("MiniMax Music 3 serial offload requires CUDA or MLX")
     else:
         pass
@@ -132,15 +134,21 @@ def create_dit_dav_executor(
     mlx_model_revision: str | None = None,
     enable_serial_offload: bool = False,
 ) -> MiniMaxMusic3AcousticScheduler:
-    if _use_mlx_backend():
+    if use_mlx_backend():
         if not current_platform.is_mps():
             raise RuntimeError("SGLANG_USE_MLX=1 requires the Apple Metal platform")
+        else:
+            pass
         if cache_dit:
             raise ValueError("MiniMax Music 3 cache_dit is unavailable with MLX")
+        else:
+            pass
         if breakable_cuda_graph:
             raise ValueError(
                 "MiniMax Music 3 breakable_cuda_graph is unavailable with MLX"
             )
+        else:
+            pass
         from .mlx.acoustic import MiniMaxMusic3MlxAcousticDecoder
 
         decoder = MiniMaxMusic3MlxAcousticDecoder(

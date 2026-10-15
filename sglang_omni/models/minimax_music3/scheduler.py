@@ -17,6 +17,7 @@ from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 
 from .serial_offload import get_coordinator
 
+
 class MiniMaxMusic3Scheduler(OmniScheduler["MiniMaxMusic3SGLangRequestData"]):
     """Admit, decode and retire every request as a CFG row pair."""
 
@@ -103,7 +104,11 @@ class MiniMaxMusic3Scheduler(OmniScheduler["MiniMaxMusic3SGLangRequestData"]):
         if coordinator.enabled:
             if limit < 2 or not coordinator.try_acquire_ar(queue[0].rid):
                 return 0
+            else:
+                pass
             return 2
+        else:
+            pass
         return limit
 
     def stream_output(

@@ -15,6 +15,8 @@ def nearest_interpolate_1d(x_ncl: mx.array, size: int) -> mx.array:
     length = x_ncl.shape[-1]
     if size == length:
         return x_ncl
+    else:
+        pass
     indices = (mx.arange(size) * (length / size)).astype(mx.int32)
     return x_ncl[:, :, mx.clip(indices, 0, length - 1)]
 

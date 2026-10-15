@@ -15,7 +15,7 @@ from sglang_omni.models.minimax_music3.config import (
 )
 
 
-def _stage(config: PipelineConfig, name: str) -> StageConfig:
+def stage_named(config: PipelineConfig, name: str) -> StageConfig:
     return next(stage for stage in config.stages if stage.name == name)
 
 
@@ -25,7 +25,9 @@ def test_absent_flag_is_a_no_op() -> None:
     result = apply_stage_offload_cli_overrides(config, stage_offload_components=None)
 
     assert result is config
-    assert _stage(result, "minimax_music3_ar").factory.enable_serial_offload is None
+    assert (
+        stage_named(result, "minimax_music3_ar").factory.enable_serial_offload is None
+    )
 
 
 def test_ar_and_dit_colocates_both_stages_and_flags_their_factory_args() -> None:
@@ -35,13 +37,15 @@ def test_ar_and_dit_colocates_both_stages_and_flags_their_factory_args() -> None
         config, stage_offload_components="ar,dit"
     )
 
-    ar_stage = _stage(result, "minimax_music3_ar")
-    dit_stage = _stage(result, "dit_dav")
+    ar_stage = stage_named(result, "minimax_music3_ar")
+    dit_stage = stage_named(result, "dit_dav")
     assert ar_stage.process == dit_stage.process
     assert ar_stage.factory.enable_serial_offload is True
     assert dit_stage.factory.enable_serial_offload is True
     # The override deep-copies, matching every other apply_*_cli_overrides.
-    assert _stage(config, "minimax_music3_ar").factory.enable_serial_offload is None
+    assert (
+        stage_named(config, "minimax_music3_ar").factory.enable_serial_offload is None
+    )
 
 
 def test_whitespace_and_case_are_normalized() -> None:
@@ -52,7 +56,8 @@ def test_whitespace_and_case_are_normalized() -> None:
     )
 
     assert (
-        _stage(result, "dit_dav").process == _stage(result, "minimax_music3_ar").process
+        stage_named(result, "dit_dav").process
+        == stage_named(result, "minimax_music3_ar").process
     )
 
 
@@ -88,7 +93,10 @@ def test_unsupported_pipeline_is_rejected() -> None:
 
 def test_mismatched_gpu_placement_is_rejected() -> None:
     config = MiniMaxMusic3DualGPUPipelineConfig(model_path="/models/minimax")
-    assert _stage(config, "minimax_music3_ar").gpu != _stage(config, "dit_dav").gpu
+    assert (
+        stage_named(config, "minimax_music3_ar").gpu
+        != stage_named(config, "dit_dav").gpu
+    )
 
     with pytest.raises(typer.BadParameter, match="same GPU"):
         apply_stage_offload_cli_overrides(config, stage_offload_components="ar,dit")

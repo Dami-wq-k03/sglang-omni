@@ -14,7 +14,7 @@ import torch
 from transformers import AutoTokenizer
 
 from sglang_omni.proto import StagePayload
-from sglang_omni.scheduling.messages import OutgoingMessage
+from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.pipeline_state import store_state
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
@@ -23,16 +23,12 @@ from ..payload_types import MiniMaxMusic3State
 from ..prompt import validate_tokenizer_ids
 from ..serial_offload import get_coordinator
 from .ar import generate_frame_hiddens
-from .loader import (
-    MiniMaxMusic3MlxARModel,
-    load_mlx_ar_model,
-    resolve_mlx_artifact,
-)
+from .loader import MiniMaxMusic3MlxARModel, load_mlx_ar_model, resolve_mlx_artifact
 
 logger = logging.getLogger(__name__)
 
 
-def _build_text_pair(
+def build_text_pair(
     prompt: str,
     model: MiniMaxMusic3MlxARModel,
     tokenizer: object,
@@ -43,6 +39,8 @@ def _build_text_pair(
             f"MiniMax Music 3 prompt has {input_ids.shape[1]} tokens; "
             "the maximum is 5000"
         )
+    else:
+        pass
     conditional = mx.array(input_ids.astype("int32"))
     unconditional = conditional
     if unconditional.shape[1] > 3:
@@ -54,6 +52,8 @@ def _build_text_pair(
         unconditional = mx.concatenate(
             [unconditional[:, :1], middle, unconditional[:, -2:]], axis=1
         )
+    else:
+        pass
     return mx.concatenate([conditional, unconditional], axis=0)
 
 
@@ -67,56 +67,68 @@ class MiniMaxMusic3MlxARScheduler(SimpleScheduler):
         revision: str | None = None,
         serial_offload: bool = False,
     ) -> None:
-        self._serial_offload = bool(serial_offload)
-        self._artifact = resolve_mlx_artifact(model_path, revision)
+        self.serial_offload_enabled = bool(serial_offload)
+        self.artifact = resolve_mlx_artifact(model_path, revision)
         self.model: MiniMaxMusic3MlxARModel | None = None
-        if not self._serial_offload:
+        if not self.serial_offload_enabled:
             self.model = load_mlx_ar_model(
                 model_path,
                 revision,
-                artifact=self._artifact,
+                artifact=self.artifact,
             )
-        tokenizer_dir = Path(self._artifact[0]) / "tokenizer"
+        else:
+            pass
+        tokenizer_dir = Path(self.artifact[0]) / "tokenizer"
         if not tokenizer_dir.is_dir():
             raise FileNotFoundError(
                 "MiniMax Music 3 MLX artifact must include its tokenizer directory"
             )
+        else:
+            pass
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_dir,
             trust_remote_code=False,
         )
         validate_tokenizer_ids(self.tokenizer)
-        self._abort_events: dict[str, threading.Event] = {}
-        self._events_lock = threading.Lock()
-        self._mlx_thread_stream = mx.new_thread_local_stream(mx.gpu)
-        if self._serial_offload:
+        self.abort_events: dict[str, threading.Event] = {}
+        self.events_lock = threading.Lock()
+        self.mlx_thread_stream = mx.new_thread_local_stream(mx.gpu)
+        if self.serial_offload_enabled:
             get_coordinator().enable()
-        super().__init__(self._generate, max_concurrency=1)
+        else:
+            pass
+        super().__init__(self.generate, max_concurrency=1)
 
-    def _abort_event(self, request_id: str) -> threading.Event:
-        with self._events_lock:
-            return self._abort_events.setdefault(request_id, threading.Event())
+    def abort_event(self, request_id: str) -> threading.Event:
+        with self.events_lock:
+            return self.abort_events.setdefault(request_id, threading.Event())
 
-    def _generate(self, payload: StagePayload) -> StagePayload:
+    def generate(self, payload: StagePayload) -> StagePayload:
         state = MiniMaxMusic3State.from_dict(payload.data)
         if state.prompt is None:
             raise ValueError("MiniMax Music 3 preprocessing did not build a prompt")
-        abort_event = self._abort_event(payload.request_id)
+        else:
+            pass
+        abort_event = self.abort_event(payload.request_id)
         started = time.perf_counter()
         coordinator = get_coordinator()
         handed_off = False
         try:
-            if self._serial_offload:
+            if self.serial_offload_enabled:
                 coordinator.acquire_ar(
                     payload.request_id,
                     should_abort=abort_event.is_set,
                 )
-                self._load_model()
+                self.load_model()
+            else:
+                pass
             if self.model is None:
                 raise RuntimeError("MiniMax Music 3 MLX AR model is not loaded")
+            else:
+                pass
             pending: list[OutgoingMessage] = []
-            with mx.stream(self._mlx_thread_stream):
-                text_ids = _build_text_pair(state.prompt, self.model, self.tokenizer)
+            with mx.stream(self.mlx_thread_stream):
+                text_ids = build_text_pair(state.prompt, self.model, self.tokenizer)
                 hidden = generate_frame_hiddens(
                     self.model.language_model,
                     self.model.rvq_depth_decoder,
@@ -131,10 +143,12 @@ class MiniMaxMusic3MlxARScheduler(SimpleScheduler):
                 for window in chunk_windows(generated_frames):
                     if abort_event.is_set():
                         raise InterruptedError("MiniMax Music 3 MLX generation aborted")
+                    else:
+                        pass
                     chunk = hidden[:, window.start : window.end].astype(mx.float16)
                     mx.eval(chunk)
                     chunk_np = np.asarray(chunk, dtype=np.float16)
-                    if self._serial_offload:
+                    if self.serial_offload_enabled:
                         chunk_np = np.array(chunk_np, copy=True, order="C")
                     else:
                         chunk_np = np.ascontiguousarray(chunk_np)
@@ -166,10 +180,12 @@ class MiniMaxMusic3MlxARScheduler(SimpleScheduler):
             state.caption = ""
             state.lyrics = ""
             result = store_state(payload, state)
-            if self._serial_offload:
-                self._release_model()
+            if self.serial_offload_enabled:
+                self.release_model()
                 coordinator.begin_dit_handoff(payload.request_id)
                 handed_off = True
+            else:
+                pass
             for message in pending:
                 self.outbox.put(message)
             logger.info(
@@ -180,25 +196,29 @@ class MiniMaxMusic3MlxARScheduler(SimpleScheduler):
             )
             return result
         except BaseException:
-            if self._serial_offload and not handed_off:
+            if self.serial_offload_enabled and not handed_off:
                 try:
-                    self._release_model()
+                    self.release_model()
                 except BaseException as cleanup_error:
                     coordinator.fail_closed(cleanup_error)
                     raise
                 coordinator.cancel_ar(payload.request_id)
+            else:
+                pass
             raise
         finally:
-            with self._events_lock:
-                self._abort_events.pop(payload.request_id, None)
+            with self.events_lock:
+                self.abort_events.pop(payload.request_id, None)
 
-    def _load_model(self) -> None:
+    def load_model(self) -> None:
         if self.model is not None:
             return
-        with mx.stream(self._mlx_thread_stream):
+        else:
+            pass
+        with mx.stream(self.mlx_thread_stream):
             self.model = load_mlx_ar_model(
-                str(self._artifact[0]),
-                artifact=self._artifact,
+                str(self.artifact[0]),
+                artifact=self.artifact,
             )
         logger.info(
             "MiniMax Music 3 MLX AR loaded active=%.2fGiB cache=%.2fGiB",
@@ -206,8 +226,8 @@ class MiniMaxMusic3MlxARScheduler(SimpleScheduler):
             mx.get_cache_memory() / 1024**3,
         )
 
-    def _release_model(self) -> None:
-        mx.synchronize(self._mlx_thread_stream)
+    def release_model(self) -> None:
+        mx.synchronize(self.mlx_thread_stream)
         self.model = None
         logger.info(
             "MiniMax Music 3 MLX AR released active=%.2fGiB cache=%.2fGiB",
@@ -216,11 +236,13 @@ class MiniMaxMusic3MlxARScheduler(SimpleScheduler):
         )
 
     def abort(self, request_id: str) -> None:
-        with self._events_lock:
-            event = self._abort_events.get(request_id)
+        with self.events_lock:
+            event = self.abort_events.get(request_id)
             if event is not None:
                 event.set()
+            else:
+                pass
         super().abort(request_id)
 
 
-__all__ = ["MiniMaxMusic3MlxARScheduler", "_build_text_pair"]
+__all__ = ["MiniMaxMusic3MlxARScheduler", "build_text_pair"]

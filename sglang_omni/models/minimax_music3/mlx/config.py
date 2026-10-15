@@ -94,6 +94,8 @@ class ModelConfig:
             known["vocoder_upsampling_ratios"] = tuple(
                 known["vocoder_upsampling_ratios"]
             )
+        else:
+            pass
         return cls(**known)
 
     @classmethod

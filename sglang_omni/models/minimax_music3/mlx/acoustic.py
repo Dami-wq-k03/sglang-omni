@@ -10,7 +10,7 @@ import mlx.core as mx
 import numpy as np
 import torch
 
-from ..acoustic import _derive_seed
+from ..acoustic import derive_seed
 from ..chunking import overlap_mel_length
 from ..serial_offload import get_coordinator
 from .euler import denoise_chunk
@@ -37,24 +37,30 @@ class MiniMaxMusic3MlxAcousticDecoder:
     ) -> None:
         if dit_steps < 1:
             raise ValueError("MiniMax Music 3 dit_steps must be positive")
+        else:
+            pass
         if dit_cfg_scale < 0:
             raise ValueError("MiniMax Music 3 dit_cfg_scale must be non-negative")
+        else:
+            pass
         self.serial_offload = bool(serial_offload)
-        self._artifact = resolve_mlx_artifact(model_path, revision)
+        self.artifact = resolve_mlx_artifact(model_path, revision)
         self.model: MiniMaxMusic3MlxAcousticModel | None = None
         if not self.serial_offload:
             self.model = load_mlx_acoustic_model(
                 model_path,
                 revision,
-                artifact=self._artifact,
+                artifact=self.artifact,
             )
+        else:
+            pass
         self.device = "mps"
         self.dtype = (
             self.model.condition_encoder.proj.weight.dtype
             if self.model is not None
             else str(
-                self._artifact[1].get("torch_dtype")
-                or self._artifact[1].get("dtype")
+                self.artifact[1].get("torch_dtype")
+                or self.artifact[1].get("dtype")
                 or "artifact"
             )
         )
@@ -64,17 +70,21 @@ class MiniMaxMusic3MlxAcousticDecoder:
         self.compile_acoustic = False
         self.cache_dit = False
         self.breakable_cuda_graph = False
-        self._mlx_thread_stream = mx.new_thread_local_stream(mx.gpu)
+        self.mlx_thread_stream = mx.new_thread_local_stream(mx.gpu)
         if self.serial_offload:
             get_coordinator().enable()
+        else:
+            pass
 
     def ensure_resident(self) -> None:
         if self.model is not None:
             return
-        with mx.stream(self._mlx_thread_stream):
+        else:
+            pass
+        with mx.stream(self.mlx_thread_stream):
             self.model = load_mlx_acoustic_model(
-                str(self._artifact[0]),
-                artifact=self._artifact,
+                str(self.artifact[0]),
+                artifact=self.artifact,
             )
         self.dtype = self.model.condition_encoder.proj.weight.dtype
         logger.info(
@@ -86,7 +96,9 @@ class MiniMaxMusic3MlxAcousticDecoder:
     def release_residency(self) -> None:
         if not self.serial_offload:
             return
-        mx.synchronize(self._mlx_thread_stream)
+        else:
+            pass
+        mx.synchronize(self.mlx_thread_stream)
         self.model = None
         logger.info(
             "MiniMax Music 3 MLX acoustic released active=%.2fGiB cache=%.2fGiB",
@@ -106,14 +118,18 @@ class MiniMaxMusic3MlxAcousticDecoder:
     ) -> tuple[torch.Tensor, mx.array, mx.array]:
         if should_abort is not None and should_abort():
             raise InterruptedError("MiniMax Music 3 MLX acoustic generation aborted")
+        else:
+            pass
         self.ensure_resident()
         if self.model is None:
             raise RuntimeError("MiniMax Music 3 MLX acoustic model is not loaded")
+        else:
+            pass
         hidden_np = hidden.detach().to(device="cpu", dtype=torch.float32).numpy()
-        with mx.stream(self._mlx_thread_stream):
+        with mx.stream(self.mlx_thread_stream):
             hidden_mx = mx.array(hidden_np)[None].astype(self.dtype)
             condition = self.model.condition_encoder(hidden_mx)
-            key = mx.random.key(_derive_seed(int(seed), "dit", int(chunk_idx)))
+            key = mx.random.key(derive_seed(int(seed), "dit", int(chunk_idx)))
             noise = mx.random.normal(
                 (
                     1,
@@ -136,6 +152,8 @@ class MiniMaxMusic3MlxAcousticDecoder:
                 raise InterruptedError(
                     "MiniMax Music 3 MLX acoustic generation aborted"
                 )
+            else:
+                pass
             waveform = self.model.vocoder(latent)[0].astype(mx.float32)
             overlap = overlap_mel_length()
             start = max(0, latent.shape[-1] - 2 * overlap)

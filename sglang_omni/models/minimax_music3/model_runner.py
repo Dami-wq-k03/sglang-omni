@@ -127,7 +127,7 @@ class MiniMaxMusic3ModelRunner(ModelRunner["MiniMaxMusic3SGLangRequestData"]):
             )
         else:
             pass
-        self._serial_offload = get_coordinator()
+        self.serial_offload = get_coordinator()
 
     def requested_capture_hidden_mode_prefill(
         self, schedule_batch: ScheduleBatch | None, requests: list[SchedulerRequest]
@@ -266,7 +266,7 @@ class MiniMaxMusic3ModelRunner(ModelRunner["MiniMaxMusic3SGLangRequestData"]):
         logger.info(
             f"MiniMax Music 3 AR done request={request_id} frames={ar_state.generated_frames} prompt_tokens={req_data.prompt_tokens} finish_reason={ar_state.finish_reason} peak_buffer_frames={ar_state.frames.peak_frames} elapsed={time.perf_counter() - ar_state.started_s:.1f}s"
         )
-        self._serial_offload.begin_dit_handoff(request_id)
+        self.serial_offload.begin_dit_handoff(request_id)
 
     def reset_request(self, request_id: str) -> None:
         data = self.request_data.pop(request_id, None)
@@ -274,7 +274,7 @@ class MiniMaxMusic3ModelRunner(ModelRunner["MiniMaxMusic3SGLangRequestData"]):
             data.ar_state = None
         else:
             pass
-        self._serial_offload.cancel_ar(request_id)
+        self.serial_offload.cancel_ar(request_id)
 
     def advance(
         self,
@@ -381,7 +381,7 @@ class MiniMaxMusic3ModelRunner(ModelRunner["MiniMaxMusic3SGLangRequestData"]):
             ar_state.frames.append(frame_hidden[index : index + 1])
             ar_state.generated_frames += 1
             self.log_progress(cond_requests[index].request_id, ar_state)
-            if not self._serial_offload.enabled:
+            if not self.serial_offload.enabled:
                 self.emit_ready_window(cond_requests[index].request_id, ar_state)
             else:
                 pass

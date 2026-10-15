@@ -21,7 +21,7 @@ from .vocoder import Vocoder
 MlxArtifact = tuple[Path, dict[str, Any], ModelConfig]
 
 
-def _make_qwen3(config: ModelConfig) -> Qwen3Model:
+def make_qwen3(config: ModelConfig) -> Qwen3Model:
     return Qwen3Model(
         Qwen3Args(
             model_type="qwen3",
@@ -46,15 +46,19 @@ class MiniMaxMusic3MlxARModel(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
-        self.language_model = _make_qwen3(config)
+        self.language_model = make_qwen3(config)
         self.rvq_depth_decoder = RVQDepthDecoder(config)
 
     @staticmethod
     def model_quant_predicate(path: str, module: nn.Module) -> bool:
         if not isinstance(module, nn.Linear):
             return False
+        else:
+            pass
         if path.endswith("lm_head") or ".audio_heads." in path:
             return False
+        else:
+            pass
         return path.startswith(
             (
                 "language_model.model.layers.",
@@ -77,6 +81,8 @@ class MiniMaxMusic3MlxAcousticModel(nn.Module):
     def model_quant_predicate(path: str, module: nn.Module) -> bool:
         if not isinstance(module, nn.Linear):
             return False
+        else:
+            pass
         return path.startswith(
             (
                 "transformer.proj_in",
@@ -86,10 +92,12 @@ class MiniMaxMusic3MlxAcousticModel(nn.Module):
         )
 
 
-def _resolve_model_directory(model_path: str, revision: str | None) -> Path:
+def resolve_artifact_directory(model_path: str, revision: str | None) -> Path:
     local_path = Path(model_path).expanduser()
     if local_path.is_dir():
         return local_path.resolve()
+    else:
+        pass
     from sglang.srt.hardware_backend.mlx.remote_code_gate import (
         ensure_remote_code_allowed,
         resolve_model_directory,
@@ -100,12 +108,14 @@ def _resolve_model_directory(model_path: str, revision: str | None) -> Path:
     return model_dir
 
 
-def _read_config(model_dir: Path) -> tuple[dict[str, Any], ModelConfig]:
+def read_config(model_dir: Path) -> tuple[dict[str, Any], ModelConfig]:
     config_path = model_dir / "config.json"
     if not config_path.is_file():
         raise FileNotFoundError(
             f"MiniMax Music 3 MLX artifact is missing {config_path}"
         )
+    else:
+        pass
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     architectures = set(raw.get("architectures") or ())
     if architectures and "MiniMaxMusic3ForConditionalGeneration" not in architectures:
@@ -113,6 +123,8 @@ def _read_config(model_dir: Path) -> tuple[dict[str, Any], ModelConfig]:
             "MiniMax Music 3 MLX artifact has an incompatible architecture: "
             f"{sorted(architectures)}"
         )
+    else:
+        pass
     config = ModelConfig.from_dict(raw)
     config.model_path = str(model_dir)
     return raw, config
@@ -120,23 +132,27 @@ def _read_config(model_dir: Path) -> tuple[dict[str, Any], ModelConfig]:
 
 def resolve_mlx_artifact(model_path: str, revision: str | None = None) -> MlxArtifact:
     """Resolve a revision once and retain its immutable local snapshot path."""
-    model_dir = _resolve_model_directory(model_path, revision)
-    raw_config, config = _read_config(model_dir)
+    model_dir = resolve_artifact_directory(model_path, revision)
+    raw_config, config = read_config(model_dir)
     return model_dir, raw_config, config
 
 
-def _load_component_weights(
+def load_component_weights(
     model_dir: Path,
     prefixes: tuple[str, ...],
 ) -> dict[str, mx.array]:
     weight_files = sorted(model_dir.glob("*.safetensors"))
     if not weight_files:
         weight_files = sorted(model_dir.glob("*.npz"))
+    else:
+        pass
     if not weight_files:
         raise FileNotFoundError(
             "MiniMax Music 3 native MLX requires a converted artifact with "
             f"safetensors or npz weights: {model_dir}"
         )
+    else:
+        pass
 
     selected: dict[str, mx.array] = {}
     for weight_file in weight_files:
@@ -144,18 +160,24 @@ def _load_component_weights(
         for name, value in shard.items():
             if not name.startswith(prefixes):
                 continue
+            else:
+                pass
             if name in selected:
                 raise ValueError(f"duplicate MiniMax Music 3 MLX tensor {name!r}")
+            else:
+                pass
             selected[name] = value
     if not selected:
         raise ValueError(
             "MiniMax Music 3 MLX artifact has no weights matching "
             + ", ".join(prefixes)
         )
+    else:
+        pass
     return selected
 
 
-def _apply_quantization(
+def apply_quantization(
     model: nn.Module,
     raw_config: dict[str, Any],
     weights: dict[str, mx.array],
@@ -165,18 +187,28 @@ def _apply_quantization(
     )
     if not isinstance(quantization, dict):
         return
+    else:
+        pass
     group_size = int(quantization.get("group_size", 64))
     predicate = getattr(model, "model_quant_predicate", None)
 
     def class_predicate(path: str, module: nn.Module):
         if not hasattr(module, "to_quantized"):
             return False
+        else:
+            pass
         if hasattr(module, "weight") and module.weight.shape[-1] % group_size:
             return False
+        else:
+            pass
         if predicate is not None and not predicate(path, module):
             return False
+        else:
+            pass
         if path in quantization:
             return quantization[path]
+        else:
+            pass
         return f"{path}.scales" in weights
 
     nn.quantize(
@@ -188,7 +220,7 @@ def _apply_quantization(
     )
 
 
-def _load_split_model(
+def load_split_model(
     model_path: str,
     revision: str | None,
     model_cls: type[nn.Module],
@@ -200,8 +232,8 @@ def _load_split_model(
         model_path, revision
     )
     model = model_cls(config)
-    weights = _load_component_weights(model_dir, prefixes)
-    _apply_quantization(model, raw_config, weights)
+    weights = load_component_weights(model_dir, prefixes)
+    apply_quantization(model, raw_config, weights)
     model.load_weights(list(weights.items()), strict=True)
     mx.eval(model.parameters())
     model.eval()
@@ -214,7 +246,7 @@ def load_mlx_ar_model(
     *,
     artifact: MlxArtifact | None = None,
 ) -> MiniMaxMusic3MlxARModel:
-    return _load_split_model(
+    return load_split_model(
         model_path,
         revision,
         MiniMaxMusic3MlxARModel,
@@ -229,7 +261,7 @@ def load_mlx_acoustic_model(
     *,
     artifact: MlxArtifact | None = None,
 ) -> MiniMaxMusic3MlxAcousticModel:
-    return _load_split_model(
+    return load_split_model(
         model_path,
         revision,
         MiniMaxMusic3MlxAcousticModel,

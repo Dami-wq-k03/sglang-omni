@@ -16,6 +16,8 @@ from .config import DIT_CFG_SCALE
 def make_sigma_schedule(num_inference_steps: int) -> np.ndarray:
     if num_inference_steps < 1:
         raise ValueError("num_inference_steps must be at least one")
+    else:
+        pass
     raw = np.linspace(
         1.0,
         1.0 / num_inference_steps,
@@ -42,6 +44,10 @@ def denoise_chunk(
             condition = mx.concatenate(
                 [previous_condition[:, :overlap], condition[:, overlap:]], axis=1
             )
+        else:
+            pass
+    else:
+        pass
 
     sigmas = make_sigma_schedule(num_inference_steps)
     x = latents
@@ -50,6 +56,8 @@ def denoise_chunk(
     for index in range(num_inference_steps):
         if should_abort is not None and should_abort():
             raise InterruptedError("MiniMax Music 3 MLX acoustic generation aborted")
+        else:
+            pass
         sigma = float(sigmas[index])
         sigma_next = float(sigmas[index + 1])
         if overlap:
@@ -57,6 +65,8 @@ def denoise_chunk(
                 1.0 - (1.0 - 1e-6) * sigma
             ) * noise_prompt + sigma * previous_latent[..., :overlap]
             x = mx.concatenate([blend, x[..., overlap:]], axis=-1)
+        else:
+            pass
         timestep = mx.full((x.shape[0],), sigma, dtype=x.dtype)
         conditional = transformer(x, timestep, condition)
         if guidance_scale == 1.0:
@@ -70,4 +80,6 @@ def denoise_chunk(
     if overlap:
         x = mx.concatenate([previous_latent[..., :overlap], x[..., overlap:]], axis=-1)
         mx.eval(x)
+    else:
+        pass
     return x, condition

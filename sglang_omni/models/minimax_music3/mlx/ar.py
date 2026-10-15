@@ -35,6 +35,8 @@ def qwen3_hidden(
 ) -> tuple[mx.array, list]:
     if cache is None:
         cache = make_prompt_cache(language_model)
+    else:
+        pass
     hidden = language_model.model(
         mx.zeros(input_embeddings.shape[:2], dtype=mx.int32),
         cache,
@@ -46,10 +48,12 @@ def qwen3_hidden(
 def lm_logits(language_model: Qwen3Model, hidden: mx.array) -> mx.array:
     if language_model.args.tie_word_embeddings:
         return language_model.model.embed_tokens.as_linear(hidden)
+    else:
+        pass
     return language_model.lm_head(hidden)
 
 
-def _embed_audio_frame(
+def embed_audio_frame(
     language_model: Qwen3Model,
     depth: RVQDepthDecoder,
     config: ModelConfig,
@@ -98,6 +102,8 @@ def generate_depth_codes(
                 code + (index - 1) * config.audio_vocab_size
             )
             sequence.append(depth.projection(embedding)[:, None, :])
+        else:
+            pass
     return mx.stack(codes, axis=1), mx.concatenate(hidden_parts, axis=-1), key
 
 
@@ -137,6 +143,8 @@ def ar_one_frame(
             cache=cache,
             ended=True,
         )
+    else:
+        pass
 
     semantic_code = (
         mx.concatenate([sampled, sampled], axis=0) - config.audio_code_offset
@@ -154,7 +162,7 @@ def ar_one_frame(
         if emit_frame
         else mx.zeros((1, config.num_codebooks * config.hidden_size))
     )
-    feedback = _embed_audio_frame(language_model, depth, config, frame_codes)
+    feedback = embed_audio_frame(language_model, depth, config, frame_codes)
     hidden, cache = qwen3_hidden(language_model, feedback, cache)
     return ARFrame(
         semantic_code=semantic_code,
@@ -184,6 +192,8 @@ def generate_frame_hiddens(
     for frame_index in range(max_frames + 1):
         if should_abort is not None and should_abort():
             raise InterruptedError("MiniMax Music 3 MLX generation aborted")
+        else:
+            pass
         key, subkey = mx.random.split(key)
         result = ar_one_frame(
             language_model,
@@ -197,10 +207,18 @@ def generate_frame_hiddens(
         last_hidden, cache = result.last_hidden, result.cache
         if result.ended:
             break
+        else:
+            pass
         if frame_index > 0:
             frames.append(result.frame_hidden)
             if len(frames) >= max_frames:
                 break
+            else:
+                pass
+        else:
+            pass
     if not frames:
         raise ValueError("MiniMax Music 3 generated zero audio frames")
+    else:
+        pass
     return mx.stack(frames, axis=1)

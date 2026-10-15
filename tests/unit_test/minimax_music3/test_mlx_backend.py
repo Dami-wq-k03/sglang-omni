@@ -13,7 +13,7 @@ mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
 
-def _write_tiny_artifact(tmp_path: Path):
+def write_tiny_artifact(tmp_path: Path):
     from mlx.utils import tree_flatten
 
     from sglang_omni.models.minimax_music3.mlx.config import ModelConfig
@@ -101,7 +101,7 @@ def test_split_loader_reads_one_converted_artifact(tmp_path: Path) -> None:
         load_mlx_ar_model,
     )
 
-    config = _write_tiny_artifact(tmp_path)
+    config = write_tiny_artifact(tmp_path)
 
     loaded_ar = load_mlx_ar_model(str(tmp_path))
     loaded_acoustic = load_mlx_acoustic_model(str(tmp_path))
@@ -122,7 +122,7 @@ def test_ar_same_seed_is_stable_across_reload(tmp_path: Path) -> None:
     from sglang_omni.models.minimax_music3.mlx.ar import generate_frame_hiddens
     from sglang_omni.models.minimax_music3.mlx.loader import load_mlx_ar_model
 
-    config = _write_tiny_artifact(tmp_path)
+    config = write_tiny_artifact(tmp_path)
     text_ids = mx.array([[1, 2, 3], [1, 2, 3]], dtype=mx.int32)
 
     first_model = load_mlx_ar_model(str(tmp_path))
@@ -158,7 +158,7 @@ def test_acoustic_release_reduces_active_mlx_allocation(tmp_path: Path) -> None:
         MiniMaxMusic3MlxAcousticDecoder,
     )
 
-    _write_tiny_artifact(tmp_path)
+    write_tiny_artifact(tmp_path)
     decoder = MiniMaxMusic3MlxAcousticDecoder(str(tmp_path), serial_offload=True)
     before = mx.get_active_memory()
 

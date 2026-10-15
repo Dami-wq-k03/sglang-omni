@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 
-class _Coordinator:
+class RecordingCoordinator:
     def __init__(self, events: list[str]) -> None:
         self.events = events
 
@@ -34,7 +34,7 @@ class _Coordinator:
         self.events.append(f"failed:{type(exc).__name__}")
 
 
-def _fake_mlx(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> ModuleType:
+def fake_mlx(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> ModuleType:
     mlx = ModuleType("mlx")
     core = ModuleType("mlx.core")
     core.gpu = object()
@@ -51,12 +51,12 @@ def _fake_mlx(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> ModuleType:
     return core
 
 
-def _import_ar_scheduler(
+def import_ar_scheduler(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     events: list[str],
 ):
-    _fake_mlx(monkeypatch, events)
+    fake_mlx(monkeypatch, events)
     transformers = ModuleType("transformers")
     transformers.AutoTokenizer = SimpleNamespace(from_pretrained=lambda *args: None)
     monkeypatch.setitem(sys.modules, "transformers", transformers)
@@ -104,19 +104,19 @@ def _import_ar_scheduler(
         lambda *args, **kwargs: object(),
     )
     monkeypatch.setattr(module, "validate_tokenizer_ids", lambda tokenizer: None)
-    coordinator = _Coordinator(events)
+    coordinator = RecordingCoordinator(events)
     monkeypatch.setattr(module, "get_coordinator", lambda: coordinator)
     (tmp_path / "tokenizer").mkdir()
     return module, coordinator
 
 
-def _import_acoustic_decoder(
+def import_acoustic_decoder(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     events: list[str],
 ):
     importlib.import_module("sglang_omni.models.minimax_music3.acoustic")
-    _fake_mlx(monkeypatch, events)
+    fake_mlx(monkeypatch, events)
     package_name = "sglang_omni.models.minimax_music3.mlx"
     package = ModuleType(package_name)
     package.__path__ = [
@@ -153,7 +153,7 @@ def _import_acoustic_decoder(
     euler.denoise_chunk = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, euler.__name__, euler)
     module = importlib.import_module(f"{package_name}.acoustic")
-    coordinator = _Coordinator(events)
+    coordinator = RecordingCoordinator(events)
     monkeypatch.setattr(module, "get_coordinator", lambda: coordinator)
     return module
 
@@ -163,7 +163,7 @@ def test_ar_offload_loads_after_ownership_and_hands_off_before_publish(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
-    module, _ = _import_ar_scheduler(monkeypatch, tmp_path, events)
+    module, _ = import_ar_scheduler(monkeypatch, tmp_path, events)
     monkeypatch.setattr(
         module.MiniMaxMusic3State,
         "from_dict",
@@ -177,7 +177,7 @@ def test_ar_offload_loads_after_ownership_and_hands_off_before_publish(
             lyrics="lyrics",
         ),
     )
-    monkeypatch.setattr(module, "_build_text_pair", lambda *args: object())
+    monkeypatch.setattr(module, "build_text_pair", lambda *args: object())
     monkeypatch.setattr(module, "store_state", lambda payload, state: state)
     source_hidden = np.zeros((1, 301, 4), dtype=np.float16)
 
@@ -208,7 +208,7 @@ def test_ar_offload_loads_after_ownership_and_hands_off_before_publish(
     scheduler = module.MiniMaxMusic3MlxARScheduler(str(tmp_path), serial_offload=True)
     assert "load" not in events
 
-    scheduler._generate(SimpleNamespace(request_id="req-1", data={}))
+    scheduler.generate(SimpleNamespace(request_id="req-1", data={}))
 
     assert scheduler.model is None
     assert scheduler.outbox.qsize() == 3
@@ -230,7 +230,7 @@ def test_ar_load_failure_releases_owner_after_synchronizing(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
-    module, _ = _import_ar_scheduler(monkeypatch, tmp_path, events)
+    module, _ = import_ar_scheduler(monkeypatch, tmp_path, events)
     monkeypatch.setattr(
         module.MiniMaxMusic3State,
         "from_dict",
@@ -244,7 +244,7 @@ def test_ar_load_failure_releases_owner_after_synchronizing(
     scheduler = module.MiniMaxMusic3MlxARScheduler(str(tmp_path), serial_offload=True)
 
     with pytest.raises(OSError, match="load failed"):
-        scheduler._generate(SimpleNamespace(request_id="req-1", data={}))
+        scheduler.generate(SimpleNamespace(request_id="req-1", data={}))
 
     assert events[-2:] == ["synchronize", "cancel:req-1"]
 
@@ -254,7 +254,7 @@ def test_ar_resident_mode_loads_during_construction(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
-    module, _ = _import_ar_scheduler(monkeypatch, tmp_path, events)
+    module, _ = import_ar_scheduler(monkeypatch, tmp_path, events)
 
     scheduler = module.MiniMaxMusic3MlxARScheduler(str(tmp_path), serial_offload=False)
 
@@ -267,7 +267,7 @@ def test_acoustic_offload_loads_once_for_chunks_then_releases(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
-    module = _import_acoustic_decoder(monkeypatch, tmp_path, events)
+    module = import_acoustic_decoder(monkeypatch, tmp_path, events)
     decoder = module.MiniMaxMusic3MlxAcousticDecoder(str(tmp_path), serial_offload=True)
     assert decoder.model is None
     assert events == ["enable"]
@@ -288,7 +288,7 @@ def test_acoustic_offload_is_stable_across_20_reload_cycles(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
-    module = _import_acoustic_decoder(monkeypatch, tmp_path, events)
+    module = import_acoustic_decoder(monkeypatch, tmp_path, events)
     decoder = module.MiniMaxMusic3MlxAcousticDecoder(str(tmp_path), serial_offload=True)
 
     for _ in range(20):

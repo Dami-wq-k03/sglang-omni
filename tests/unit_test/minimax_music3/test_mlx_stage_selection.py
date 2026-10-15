@@ -11,15 +11,15 @@ import pytest
 from sglang_omni.models.minimax_music3 import stages
 
 
-def _select_mlx(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(stages, "_use_mlx_backend", lambda: True)
+def select_mlx(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stages, "use_mlx_backend", lambda: True)
     monkeypatch.setattr(stages.current_platform, "is_mps", lambda: True)
 
 
 def test_create_ar_executor_selects_native_mlx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _select_mlx(monkeypatch)
+    select_mlx(monkeypatch)
     observed = {}
 
     class Scheduler:
@@ -52,7 +52,7 @@ def test_create_ar_executor_selects_native_mlx(
 def test_create_ar_executor_forwards_serial_offload_to_mlx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _select_mlx(monkeypatch)
+    select_mlx(monkeypatch)
     observed = {}
 
     class Scheduler:
@@ -77,7 +77,7 @@ def test_create_ar_executor_forwards_serial_offload_to_mlx(
 def test_create_acoustic_executor_selects_native_mlx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _select_mlx(monkeypatch)
+    select_mlx(monkeypatch)
     observed = {}
 
     class Decoder:
@@ -111,7 +111,7 @@ def test_create_acoustic_executor_selects_native_mlx(
         mlx_model_revision="revision-b",
     )
 
-    assert scheduler._decoder.__class__ is Decoder
+    assert scheduler.decoder.__class__ is Decoder
     assert observed == {
         "model_path": "mlx-community/MiniMax-Music3-mxfp8",
         "revision": "revision-b",
@@ -124,7 +124,7 @@ def test_create_acoustic_executor_selects_native_mlx(
 def test_create_acoustic_executor_forwards_serial_offload_to_mlx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _select_mlx(monkeypatch)
+    select_mlx(monkeypatch)
     observed = {}
 
     class Decoder:
@@ -152,7 +152,7 @@ def test_mlx_acoustic_rejects_cuda_only_options(
     monkeypatch: pytest.MonkeyPatch,
     option: str,
 ) -> None:
-    _select_mlx(monkeypatch)
+    select_mlx(monkeypatch)
 
     with pytest.raises(ValueError, match="unavailable with MLX"):
         stages.create_dit_dav_executor(
