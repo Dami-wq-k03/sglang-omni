@@ -1,37 +1,47 @@
-# CI Labels
+# CI Workflows and Labels
 
-SGLang-Omni CI runs on self-hosted runners: H100 machines for the GPU stages, an Intel Xeon host, an Intel GPU host and an Apple Silicon Mac. A pull request runs none of it until a maintainer adds CI labels. Once labeled, every later push re-runs CI for as long as the labels stay. Draft pull requests are blocked even when they are labeled.
+SGLang-Omni CI has two parts. A few fast checks run on GitHub-hosted runners for every pull request. Everything else runs on self-hosted runners: H100 machines for the GPU stages, an Intel Xeon host, an Intel GPU host and an Apple Silicon Mac. **A pull request runs none of the self-hosted CI until a maintainer adds CI labels.** Once labeled, every later push re-runs CI for as long as the labels stay. Draft pull requests are blocked from self-hosted CI even when they are labeled.
 
-There are two kinds of labels. A stage label decides which part of CI runs. A model label decides which model a stage tests. This page lists every stage, the jobs and models it covers, and what each label does. `.github/scripts/resolve_ci_labels.py` implements these rules, and every CI workflow resolves its labels through that script.
+This page goes through the workflows in order. Each section first says what runs, then which labels select it. Two kinds of labels exist: a stage label decides whether a part of the self-hosted CI runs, and a model label decides which model that part tests. The full label rules come after the workflows. `.github/scripts/resolve_ci_labels.py` implements them, and every self-hosted workflow resolves its labels through that script.
 
-## Rules
+## Overview
 
-1. A stage runs only when its stage label or `run-all-ci` is on the pull request. `run-all-ci` selects every stage.
-2. A pull request needs at least one stage label. Without one, the CI gate fails with `No CI label found`.
-3. Any stage label also runs the H100 unit tests (PR Test). This includes the hardware stages: a pull request labeled only `run-mac-ci` still runs PR Test on H100.
-4. A model label only picks the model of a selected stage. It never selects a stage by itself. If neither its stage label nor `run-all-ci` is present, the label is ignored and the gate prints a warning.
-5. A selected stage without a model label draws its model at random from that stage's pool. The draw is seeded by the workflow run ID, so re-running jobs in the same run keeps the same model, while a new push or a newly added label starts a new run and draws again.
-6. Each stage takes at most one model label. Two model labels for the same stage fail the gate, even when that stage is not selected.
-7. Stage labels combine. `run-tts-ci` together with `run-mps-ci` runs PR Test, TTS and MPS, and nothing else.
-
-## Stage labels
-
-| Label | Stage | Workflow | Runner |
+| Workflow | Runner | What it runs | When it runs |
 | --- | --- | --- | --- |
-| `run-all-ci` | Every stage below | All of them | All of them |
-| `run-asr-ci` | ASR | Omni CI | H100 |
-| `run-tts-ci` | TTS | Omni CI | H100 |
-| `run-mps-ci` | MPS | Omni CI | H100 |
-| `run-omni-ci` | Omni | Omni CI | H100 |
-| `run-intel-cpu-ci` | Intel CPU | CPU CI | Intel Xeon (`intel-omni-spr`) |
-| `run-intel-xpu-ci` | Intel XPU | XPU CI | Intel GPU (`intel-omni-bmg`) |
-| `run-mac-ci` | Mac | Voxt Mac CI | Apple Silicon |
+| Lint | GitHub-hosted | pre-commit and the realtime playback test | Every pull request |
+| Test Layout | GitHub-hosted | Test file location check | Every pull request |
+| Docs Check | GitHub-hosted | Sphinx documentation build | Every pull request |
+| Rust Router | GitHub-hosted | Rust router format, lint, tests and release build | Every pull request |
+| Omni CI | H100 | PR Test, then the ASR, TTS, MPS and Omni stages | Any stage label |
+| CPU CI | Intel Xeon (`intel-omni-spr`) | Intel CPU unit tests | `run-intel-cpu-ci` or `run-all-ci` |
+| XPU CI | Intel GPU (`intel-omni-bmg`) | Intel GPU device layer tests | `run-intel-xpu-ci` or `run-all-ci` |
+| Voxt Mac CI | Apple Silicon | MLX native runtime and Voxt app tests | `run-mac-ci` or `run-all-ci` |
 
 XPU means the Intel GPU runner. Huawei Ascend has no test CI.
 
+## Checks on every pull request
+
+These workflows run on GitHub-hosted runners for every pull request, drafts included, with no label. They need no secrets and no project hardware.
+
+| Workflow | Job | What it checks |
+| --- | --- | --- |
+| Lint | `lint` | `pre-commit run --all-files`: formatting, import order, Ruff, YAML and TOML syntax, and the other hooks in `.pre-commit-config.yaml`. |
+| Lint | `playback-test` | `node --test` on the realtime playback state in `playground/qwen-omni/realtime/`. |
+| Test Layout | `test-layout` | Every Python file under `tests/` lives in `tests/unit_test/`, `tests/test_model/`, `tests/test_ci/` or `tests/utils/`. |
+| Docs Check | `build-docs` | The documentation builds with `docs/requirements.txt`. |
+| Rust Router | `quality` | `cargo fmt`, a check on the minimum supported Rust version, Clippy with warnings as errors, the tests, the docs, a release build, and `--check-config` on every example config. |
+
+The `lint` check is required: a pull request cannot merge into `main` until it passes. Lint takes about two minutes; its pre-commit hook environments are cached, and every push to `main` refreshes that cache.
+
+Lint also comes first for the self-hosted CI. The gate job of every self-hosted workflow waits until the `lint` check on the same commit succeeds and the pull request has no merge conflict. A lint failure or a merge conflict therefore stops self-hosted CI before it takes a runner.
+
+The NPU image workflow (Release Docker Images Nightly) also runs on GitHub-hosted runners, but only for pull requests that change the NPU Dockerfile, NPU configuration, NPU installer or their tests. It checks the NPU configuration and installer without hardware and builds the ARM64 image without publishing it. A full image build takes 10 to 15 minutes, so it does not run for unrelated pull requests.
+
+A pull request from a fork whose author has not had a pull request merged yet waits for a maintainer to click "Approve and run" before any workflow starts, these checks included. This approval stays on because a fork can edit a workflow file to run its own code on the self-hosted runners.
+
 ## The Omni CI workflow
 
-The Omni CI workflow hosts PR Test and the four H100 model stages. Its preflight job resolves the labels once. A shared setup job then builds the virtualenv and downloads model weights. The suites run in this order:
+Omni CI runs PR Test and the four H100 model stages. Its preflight job waits for lint, resolves the labels and draws the models once. A shared setup job then builds the virtualenv and downloads model weights. The suites run in this order:
 
 PR Test → ASR → TTS → MPS → Omni
 
@@ -39,21 +49,21 @@ Each suite waits for the previous one to finish. A suite that fails or is not se
 
 ### PR Test
 
-PR Test has no label of its own and runs whenever any stage is selected. It has two jobs on H100:
-
 | Job | What it runs |
 | --- | --- |
 | `unit-test` | `pytest tests/ -m "not benchmark and not accelerator"`, with CUDA hidden from the process |
 | `unit-test-accelerator` | `pytest tests/ -m "accelerator and not benchmark"`, the unit tests that need a GPU |
 
-### ASR (`run-asr-ci`)
+PR Test has no label of its own. It runs whenever any stage label selects a stage, the hardware stages included.
+
+### ASR
 
 | Job | What it covers |
 | --- | --- |
 | stage 1 - MOSS-TD multi-speaker | Multi-speaker transcription and diarization with MOSS-Transcribe-Diarize, behind a two-worker router: movies800 in offline and streaming mode, AISHELL-4 long-form audio and googletime. It gates character error rate and speed. This job always uses MOSS-Transcribe-Diarize, whatever model the stage draws. |
 | stage 2 - SeedTTS ASR | The selected model on the SeedTTS English and Chinese splits. It gates word error rate on both splits, and throughput, latency and real-time factor on the English split. |
 
-The selected model applies to stage 2:
+The stage label is `run-asr-ci`. A model label picks the model for stage 2:
 
 | Model label | Checkpoint | In the random pool |
 | --- | --- | --- |
@@ -61,7 +71,7 @@ The selected model applies to stage 2:
 | `run-asr-qwen3-asr-1.7b` | `Qwen/Qwen3-ASR-1.7B` | Yes |
 | `run-asr-whisper-large-v3` | `openai/whisper-large-v3` | Yes |
 
-### TTS (`run-tts-ci`)
+### TTS
 
 | Job | What it covers |
 | --- | --- |
@@ -71,7 +81,7 @@ The selected model applies to stage 2:
 | stage 3 - consistency | Checks the artifacts of stages 1 and 2: both cover all 1088 SeedTTS English samples, every streaming request finished, and streaming and non-streaming audio durations agree. |
 | stage 4 - serving stress | A mixed production workload over the REST, streaming and WebSocket endpoints through a two-worker router. This job always uses Higgs-TTS, whatever model the stage draws. |
 
-The selected model applies to stages 1, 2, 3 and the latency stage:
+The stage label is `run-tts-ci`. A model label picks the model for stages 1, 2, 3 and the latency stage:
 
 | Model label | Checkpoint | In the random pool |
 | --- | --- | --- |
@@ -83,18 +93,18 @@ The selected model applies to stages 1, 2, 3 and the latency stage:
 
 Qwen3-TTS CustomVoice uses a named voice instead of a reference clip, and its thresholds are not yet calibrated on the CI host. It reports its metrics without gating on them, and only its model label selects it.
 
-### MPS (`run-mps-ci`)
+### MPS
 
 MPS has one job, stage 1 - MPS non-streaming. It runs two TTS router workers on a single H100 that share the GPU through CUDA MPS, and checks three things: the two workers are separate MPS clients on the intended GPU, they actually execute at the same time, and the non-streaming word error rate, speaker similarity, UTMOS and audio integrity match the TTS stage's assertions.
 
-MPS draws its model independently of the TTS stage, and TTS model labels do not affect it:
+The stage label is `run-mps-ci`. MPS draws its model independently of the TTS stage, and TTS model labels do not affect it:
 
 | Model label | Checkpoint | MPS config | In the random pool |
 | --- | --- | --- | --- |
 | `run-mps-higgs-tts-3-4b` | `bosonai/higgs-tts-3-4b` | `examples/mps_dp/configs/higgs_h100_dp3.yaml` | Yes |
 | `run-mps-moss-tts-local-transformer-v1.5` | `OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5` | `examples/mps_dp/configs/moss_local_h100_dp2.yaml` | Yes |
 
-### Omni (`run-omni-ci`)
+### Omni
 
 Every job runs the selected model unless noted otherwise. A job named "Talker" asks for text and audio output, and also gates the word error rate between the text answer and an ASR transcript of the spoken answer.
 
@@ -109,31 +119,63 @@ Every job runs the selected model unless noted otherwise. A job named "Talker" a
 | stage 10 - Video-AMME Talker | Video with audio and spoken answers, with the thinker sharded across two GPUs (tensor parallel size 2). |
 | stage 11 - process replicas | A two-GPU deployment with one code2wav replica on each GPU; checks that both replicas start, register and receive requests. Runs only for Qwen3-Omni. |
 
+The stage label is `run-omni-ci`. A model label picks the model:
+
 | Model label | Checkpoint | In the random pool |
 | --- | --- | --- |
 | `run-omni-qwen3-omni-30b-a3b-instruct` | `Qwen/Qwen3-Omni-30B-A3B-Instruct` | Yes |
 | `run-omni-minicpm-o-4.5` | `openbmb/MiniCPM-o-4_5` | Yes |
 
-## Hardware stages
+## Hardware workflows
 
-The hardware stages are separate workflows with no model labels. Each keeps a path filter, so a stage label alone does not force a run. A pull request that changes none of the stage's paths skips its tests.
+Each hardware stage is its own workflow, with a gate job that waits for lint and resolves the labels. None of them has model labels. Each keeps a path filter, so a stage label alone does not force a run: a pull request that changes none of the stage's paths skips its tests.
 
-### Intel CPU (`run-intel-cpu-ci`)
+### CPU CI
 
-The CPU CI workflow builds the Intel Xeon image from `docker/cpu.Dockerfile` and runs `pytest tests/unit_test/cpu/`. It runs when the pull request touches `sglang_omni/` (except Markdown files), `tests/unit_test/cpu/`, `pyproject_cpu.toml`, `scripts/cpu/`, `docker/cpu.Dockerfile` or the workflow itself. When those paths are untouched, or when the pull request selects other stages but not Intel CPU, the test job is skipped and the `CPU CI Status` check still reports success.
+CPU CI builds the Intel Xeon image from `docker/cpu.Dockerfile` and runs `pytest tests/unit_test/cpu/`. Its tests run when the pull request touches `sglang_omni/` (except Markdown files), `tests/unit_test/cpu/`, `pyproject_cpu.toml`, `scripts/cpu/`, `docker/cpu.Dockerfile` or the workflow itself.
 
-### Intel XPU (`run-intel-xpu-ci`)
+The stage label is `run-intel-cpu-ci`. When the paths are untouched, or when the pull request selects other stages but not Intel CPU, the test job is skipped and the `CPU CI Status` check still reports success.
 
-The XPU CI workflow pulls or builds the Intel GPU image from `docker/xpu.Dockerfile` and runs the device layer tests in `tests/unit_test/xpu/test_device_layer.py` and the dots.tts flow head and tail tests. It runs when the pull request touches `sglang_omni/`, `tests/unit_test/xpu/`, `tests/unit_test/dots_tts/`, `pyproject_xpu.toml`, `scripts/xpu/`, `docker/xpu.Dockerfile` or the workflow itself.
+### XPU CI
 
-### Mac (`run-mac-ci`)
+XPU CI pulls or builds the Intel GPU image from `docker/xpu.Dockerfile` and runs the device layer tests in `tests/unit_test/xpu/test_device_layer.py` and the dots.tts flow head and tail tests. Its tests run when the pull request touches `sglang_omni/`, `tests/unit_test/xpu/`, `tests/unit_test/dots_tts/`, `pyproject_xpu.toml`, `scripts/xpu/`, `docker/xpu.Dockerfile` or the workflow itself.
 
-The Voxt Mac CI workflow has two jobs on Apple Silicon. The native runtime job builds the MLX runtime, checks its golden outputs on a frozen corpus for Qwen3-ASR and the other native models, and runs the server API tests. The Voxt unit test job builds the Voxt app with Xcode and runs its Omni and MLX test classes. The workflow starts only when the pull request touches `Voxt/`, `sglang_omni_mlx/` or the workflow itself; otherwise it does not appear on the pull request at all.
+The stage label is `run-intel-xpu-ci`.
+
+### Voxt Mac CI
+
+Voxt Mac CI has two jobs on Apple Silicon. The native runtime job builds the MLX runtime, checks its golden outputs on a frozen corpus for Qwen3-ASR and the other native models, and runs the server API tests. The Voxt unit test job builds the Voxt app with Xcode and runs its Omni and MLX test classes. The workflow starts only when the pull request touches `Voxt/`, `sglang_omni_mlx/` or the workflow itself; otherwise it does not appear on the pull request at all.
+
+The stage label is `run-mac-ci`.
+
+## Label rules
+
+1. A stage runs only when its stage label or `run-all-ci` is on the pull request. `run-all-ci` selects every stage.
+2. Self-hosted CI needs at least one stage label. Without one, the gates of Omni CI and the hardware workflows fail with `No CI label found`. The checks on GitHub-hosted runners do not depend on labels.
+3. Any stage label also runs PR Test. A pull request labeled only `run-mac-ci` still runs PR Test on H100.
+4. A model label only picks the model of a selected stage. It never selects a stage by itself. If neither its stage label nor `run-all-ci` is present, the label is ignored and the gate prints a warning.
+5. A selected stage without a model label draws its model at random from that stage's pool. The draw is seeded by the workflow run ID, so re-running jobs in the same run keeps the same model, while a new push or a newly added label starts a new run and draws again.
+6. Each stage takes at most one model label. Two model labels for the same stage fail the gate, even when that stage is not selected.
+7. Stage labels combine. `run-tts-ci` together with `run-mps-ci` runs PR Test, TTS and MPS, and nothing else.
+
+| Stage label | Selects |
+| --- | --- |
+| `run-all-ci` | Every stage |
+| `run-asr-ci` | ASR in Omni CI |
+| `run-tts-ci` | TTS in Omni CI |
+| `run-mps-ci` | MPS in Omni CI |
+| `run-omni-ci` | Omni in Omni CI |
+| `run-intel-cpu-ci` | CPU CI |
+| `run-intel-xpu-ci` | XPU CI |
+| `run-mac-ci` | Voxt Mac CI |
 
 ## Examples
 
+The checks on GitHub-hosted runners run in every case below, so the table lists only the self-hosted CI.
+
 | Labels | What runs |
 | --- | --- |
+| none | Nothing. The self-hosted gates fail with `No CI label found`. |
 | `run-tts-ci` | PR Test, then TTS on a random model from its pool. |
 | `run-tts-ci`, `run-tts-moss-tts-local-transformer-v1.5` | PR Test, then TTS on MOSS-TTS. |
 | `run-tts-ci`, `run-mps-ci` | PR Test, TTS and MPS, each with its own random model. |
@@ -170,5 +212,7 @@ The `/rerun-failed-ci` comment command still re-runs the failed jobs of a pull r
 | `No CI label found. Add run-all-ci or a stage label: ...` | The pull request has no stage label. Add `run-all-ci` or a stage label. |
 | `Keep only one <stage> model label: ...` | Two model labels name the same stage. Remove one of them. |
 | `Ignoring <label>: its stage label and run-all-ci are both missing.` | A warning, not a failure. The model label has no effect until its stage is selected. |
+| `'lint' check completed with conclusion=failure; skip staged CI.` | Lint failed on this commit. Fix it and push; self-hosted CI starts once lint passes. |
+| `PR has merge conflicts with the base branch; skip staged CI.` | Merge or rebase onto the current `main` first. |
 
 A branch created before these labels existed does not contain `resolve_ci_labels.py`. On such a branch, the Omni CI and Voxt Mac CI gates fail until the branch merges the current `main`.

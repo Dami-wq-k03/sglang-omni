@@ -30,7 +30,7 @@
 
 ## CI
 
-CI runs on self-hosted runners and requires a maintainer to add CI labels. Once labeled, every subsequent push re-triggers CI as long as the labels remain. Draft PRs are skipped even if labeled.
+Lint, Test Layout, Docs Check and Rust Router run on GitHub-hosted runners for every PR, and `lint` must pass before merging. The rest of CI runs on self-hosted runners, starts only after lint passes, and requires a maintainer to add CI labels. Once labeled, every subsequent push re-triggers CI as long as the labels remain. Draft PRs are skipped even if labeled.
 
 - `run-all-ci` runs every stage below.
 - A stage label runs one stage: `run-asr-ci`, `run-tts-ci`, `run-mps-ci` and `run-omni-ci` on H100, `run-intel-cpu-ci` (Intel Xeon), `run-intel-xpu-ci` (Intel GPU) and `run-mac-ci` (Apple Silicon). The hardware stages still skip a PR that touches none of their paths.
