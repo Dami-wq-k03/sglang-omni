@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+import benchmarks.duplex.fdb.__main__ as runbook_cli
 from benchmarks.duplex.fdb import asr as asr_module
 from benchmarks.duplex.fdb import generate as generate_module
 from benchmarks.duplex.fdb import judge as judge_module
@@ -196,6 +197,44 @@ def test_each_dataset_has_its_own_selection_options(tmp_path: Path) -> None:
     ):
         with pytest.raises(SystemExit):
             parse_selection(*arguments)
+
+
+def test_run_chains_the_steps_with_the_generate_options_and_stops_at_a_failure(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = ["--repeat", "2", "--num-shards", "3", "--v15-per-subset", "0"]
+    parser = build_parser()
+    args = parser.parse_args(["run", *options])
+    selections = sample_selection(parser, args)
+    assert selections == sample_selection(
+        parser, parser.parse_args(["generate", *options])
+    )
+    calls = []
+
+    def step(name: str, error: str | None = None):
+        def record(*arguments, **keywords) -> None:
+            calls.append((name, arguments, keywords))
+            if error is not None:
+                raise SystemExit(error)
+            else:
+                pass
+
+        return record
+
+    for name in ("generate", "asr", "judge", "aggregate"):
+        monkeypatch.setattr(runbook_cli, name, step(name))
+    runbook_cli.run_steps(settings, args.repeat, *selections, args.num_shards)
+    assert calls == [
+        ("generate", (settings, 2, *selections, 3), {}),
+        ("asr", (settings, 2), {"retry_failed": False}),
+        ("judge", (settings, 2), {"retry_failed": False}),
+        ("aggregate", (settings,), {}),
+    ]
+    calls.clear()
+    monkeypatch.setattr(runbook_cli, "asr", step("asr", "WARNING: rerun asr"))
+    with pytest.raises(SystemExit, match="rerun asr"):
+        runbook_cli.run_steps(settings, args.repeat, *selections, args.num_shards)
+    assert [name for name, _, _ in calls] == ["generate", "asr"]
 
 
 def test_leave_out_hint_names_an_option_change_the_parser_accepts() -> None:

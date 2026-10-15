@@ -28,6 +28,7 @@ from benchmarks.duplex.fdb.servers import RunningServer
 WAIT_TIMEOUT_S = 10
 SUBCOMMANDS = (
     "setup",
+    "run",
     "generate",
     "asr",
     "judge",
