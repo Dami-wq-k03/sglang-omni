@@ -24,11 +24,11 @@ In this sense, two kinds of labels exist: a stage label decides whether a part o
 | XPU CI | Intel GPU (`intel-omni-bmg`) | Intel GPU device layer tests | `run-intel-xpu-ci` or `run-all-ci` |
 | Voxt Mac CI | Apple Silicon | MLX native runtime and Voxt app tests | `run-mac-ci` or `run-all-ci` |
 
-The Omni CI stages are the core of the project's CI: they serve the main ASR, TTS and omni models end to end on H100 and gate their accuracy and speed. [The Omni CI workflow](#the-omni-ci-workflow) lists every job in each stage. XPU means the Intel GPU runner. Huawei Ascend has no test CI.
+The Omni CI stages are the core of the project's CI: they serve the main ASR, TTS and omni models end to end on H100 and gate their accuracy and speed.
 
-## Checks on every pull request
+## Checks On Every Pull Request
 
-These workflows run on GitHub-hosted runners for every pull request, drafts included, with no label. They need no secrets and no project hardware.
+These workflows run on GitHub-hosted runners for every pull request, drafts included, with no label.
 
 | Workflow | Job | What it checks |
 | --- | --- | --- |
@@ -39,19 +39,13 @@ These workflows run on GitHub-hosted runners for every pull request, drafts incl
 | Rust Router | `quality` | `cargo fmt`, a check on the minimum supported Rust version, Clippy with warnings as errors, the tests, the docs, a release build, and `--check-config` on every example config. |
 | Release Docker Images Nightly (NPU) | `preprocess`, `build_and_publish_arm64` | The NPU configuration and installer tests without hardware, then an ARM64 build of `docker/npu.Dockerfile`, which copies the whole repository. Pull requests never publish the image, and a new push cancels the build still running for the previous one. |
 
-The `lint` check is required: a pull request cannot merge into `main` until it passes. Lint takes about two minutes; its pre-commit hook environments are cached, and every push to `main` refreshes that cache.
-
-Lint also comes first for the self-hosted CI. The gate job of every self-hosted workflow waits until the `lint` check on the same commit succeeds and the pull request has no merge conflict. A lint failure or a merge conflict therefore stops self-hosted CI before it takes a runner.
-
-A pull request from a fork whose author has not had a pull request merged yet waits for a maintainer to click "Approve and run" before any workflow starts, these checks included. This approval stays on because a fork can edit a workflow file to run its own code on the self-hosted runners.
-
 ## The Omni CI workflow
 
-Omni CI runs PR Test and the four H100 model stages. Its preflight job waits for lint, resolves the labels and draws the models once. A shared setup job then builds the virtualenv and downloads model weights. The suites run in this order:
+Omni CI runs PR Test and the four H100 model stages. Its preflight job waits for lint, resolves the labels and draws the models once. A shared setup job then builds the virtualenv and downloads model weights. With `run-all-ci`, the stages run in this order:
 
 PR Test → ASR → TTS → MPS → Omni
 
-Each suite waits for the previous one to finish. A suite that fails or is not selected does not stop the suites after it. A failed setup job blocks every suite.
+Only PR Test and the selected stages actually run; a stage that is not selected is skipped at once. With `run-omni-ci` alone, Omni starts as soon as PR Test finishes, and with `run-tts-ci` and `run-mps-ci`, the order is PR Test → TTS → MPS. Each stage waits for the previous one to finish, and a stage that fails does not stop the stages after it. A failed setup job blocks every stage.
 
 ### PR Test
 
