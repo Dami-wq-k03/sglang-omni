@@ -39,7 +39,9 @@ JUDGE_DECODING = {
 JUDGE_SEEDS = [1, 2, 3]
 
 
-def model_server_command(settings: Settings) -> list[str]:
+def model_server_command(settings: Settings, *options: str) -> list[str]:
+    """The model server launch; options are extra server flags, such as
+    ``--max_sessions 8``."""
     return [
         sys.executable,
         "-m",
@@ -52,6 +54,7 @@ def model_server_command(settings: Settings) -> list[str]:
         "--enable-realtime",
         "--port",
         str(settings.server_port),
+        *options,
     ]
 
 
@@ -189,10 +192,12 @@ def running_server(
 
 
 @contextmanager
-def model_server(settings: Settings, log_file: Path) -> Iterator[RunningServer]:
+def model_server(
+    settings: Settings, log_file: Path, *options: str
+) -> Iterator[RunningServer]:
     with running_server(
         "model server",
-        model_server_command(settings),
+        model_server_command(settings, *options),
         settings.gpu,
         settings.server_port,
         log_file,

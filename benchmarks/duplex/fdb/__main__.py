@@ -7,6 +7,7 @@ Run from the repository root with the sglang-omni venv active:
     python -m benchmarks.duplex.fdb asr --run-name smoke
     python -m benchmarks.duplex.fdb judge --run-name smoke
     python -m benchmarks.duplex.fdb aggregate --run-name smoke
+    python -m benchmarks.duplex.fdb serving --run-name smoke --concurrency 1,2
 
 Each dataset has its own selection options; a count of 0 leaves it out.
 """
@@ -32,6 +33,7 @@ from benchmarks.duplex.fdb.selection import (
     parse_subset_count,
 )
 from benchmarks.duplex.fdb.servers import serve_judge, serve_model
+from benchmarks.duplex.fdb.serving import parse_levels, serving
 from benchmarks.duplex.fdb.setup_assets import setup
 from benchmarks.duplex.v10_dataset import SUBSETS as V10_SUBSETS
 from benchmarks.duplex.v15_dataset import SUBSETS as V15_SUBSETS
@@ -39,30 +41,30 @@ from benchmarks.duplex.v15_dataset import SUBSETS as V15_SUBSETS
 SIGTERM_EXIT_CODE = 143
 DEFAULT_RUN_NAME = "minicpmo-48"
 DEFAULT_PER_SUBSET = 12
+SERVING_PER_SUBSET = 4
 # note (luojiaxuan): option prefix, name, subsets, unit and size of each dataset.
-DATASETS = (
-    ("v15", "v1.5", V15_SUBSETS, "pairs", 498),
-    ("v10", "v1.0", V10_SUBSETS, "samples", 727),
-)
+Dataset = tuple[str, str, tuple[str, ...], str, int]
+V15: Dataset = ("v15", "v1.5", V15_SUBSETS, "pairs", 498)
+V10: Dataset = ("v10", "v1.0", V10_SUBSETS, "samples", 727)
+DATASETS = (V15, V10)
 
 
-def add_selection_arguments(parser: argparse.ArgumentParser) -> None:
-    selection = parser.add_argument_group(
-        "sample selection",
-        "Each dataset takes the first N samples of every subset in sample-ID "
-        "order; v1.5 counts pairs, v1.0 counts samples. Default: 12 per subset "
-        "of both. A count of 0 leaves that dataset out of the run.",
-    )
-    for prefix, label, subsets, unit, total in DATASETS:
+def add_selection_arguments(
+    parser: argparse.ArgumentParser,
+    datasets: tuple[Dataset, ...],
+    per_subset: int,
+    description: str,
+) -> None:
+    selection = parser.add_argument_group("sample selection", description)
+    for prefix, label, subsets, unit, total in datasets:
         exclusive = selection.add_mutually_exclusive_group()
         exclusive.add_argument(
             f"--{prefix}-per-subset",
             dest=f"{prefix}_per_subset",
             type=parse_count,
-            default=DEFAULT_PER_SUBSET,
+            default=per_subset,
             metavar="N|all",
-            help=f"{label} {unit} per subset; 'all' selects all {total}, 0 leaves "
-            f"{label} out",
+            help=f"{label} {unit} per subset; 'all' selects all {total}",
         )
         exclusive.add_argument(
             f"--{prefix}-sample-id",
@@ -127,7 +129,14 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[repeat_options],
         help="Step 1: record sessions, export scoring audio",
     )
-    add_selection_arguments(generate_parser)
+    add_selection_arguments(
+        generate_parser,
+        DATASETS,
+        DEFAULT_PER_SUBSET,
+        "Each dataset takes the first N samples of every subset in sample-ID "
+        "order; v1.5 counts pairs, v1.0 counts samples. Default: 12 per subset "
+        "of both. A count of 0 leaves that dataset out of the run.",
+    )
     generate_parser.add_argument(
         "--num-shards",
         type=int,
@@ -149,6 +158,27 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[run_options],
         help="Combine finished repeats into RESULTS.md",
     )
+    serving_parser = commands.add_parser(
+        "serving",
+        parents=[run_options],
+        help="Record one v1.5 selection at several concurrency levels; "
+        "SERVING.md tabulates latency and deadline misses",
+    )
+    serving_parser.add_argument(
+        "--concurrency",
+        type=parse_levels,
+        required=True,
+        metavar="N,N,...",
+        help="Concurrency levels, recorded in this order; the model server "
+        "admits as many sessions as the largest",
+    )
+    add_selection_arguments(
+        serving_parser,
+        (V15,),
+        SERVING_PER_SUBSET,
+        "The first N v1.5 pairs of every category in sample-ID order; every "
+        "level records the same pairs. Default: 4 per category.",
+    )
     commands.add_parser(
         "serve-model",
         parents=[log_options],
@@ -167,35 +197,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def dataset_selection(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, dataset: Dataset
+) -> SampleSelection:
+    prefix, label, _, _, _ = dataset
+    sample_ids = getattr(args, f"{prefix}_sample_ids")
+    ids_file = getattr(args, f"{prefix}_sample_ids_file")
+    if ids_file is not None:
+        sample_ids = ids_file.read_text().split()
+    else:
+        pass
+    subset_counts = getattr(args, f"{prefix}_subset_counts")
+    if sample_ids is not None and subset_counts:
+        parser.error(
+            f"--{prefix}-subset-count cannot be combined with explicit {label} "
+            "sample IDs"
+        )
+    else:
+        pass
+    return SampleSelection(
+        per_subset=getattr(args, f"{prefix}_per_subset"),
+        subset_counts=dict(subset_counts),
+        sample_ids=sample_ids,
+    )
+
+
 def sample_selection(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> tuple[SampleSelection, SampleSelection]:
     """The v1.5 pair selection and the v1.0 sample selection."""
-    selections = []
-    for prefix, label, _, _, _ in DATASETS:
-        sample_ids = getattr(args, f"{prefix}_sample_ids")
-        ids_file = getattr(args, f"{prefix}_sample_ids_file")
-        if ids_file is not None:
-            sample_ids = ids_file.read_text().split()
-        else:
-            pass
-        subset_counts = getattr(args, f"{prefix}_subset_counts")
-        if sample_ids is not None and subset_counts:
-            parser.error(
-                f"--{prefix}-subset-count cannot be combined with explicit {label} "
-                "sample IDs"
-            )
-        else:
-            pass
-        selections.append(
-            SampleSelection(
-                per_subset=getattr(args, f"{prefix}_per_subset"),
-                subset_counts=dict(subset_counts),
-                sample_ids=sample_ids,
-            )
-        )
-    v15_selection, v10_selection = selections
-    return v15_selection, v10_selection
+    return dataset_selection(parser, args, V15), dataset_selection(parser, args, V10)
 
 
 def exit_on_sigterm(signal_number: int, frame: FrameType | None) -> None:
@@ -231,6 +262,8 @@ def main() -> None:
         judge(settings, args.repeat, args.retry_failed)
     elif args.command == "aggregate":
         aggregate(settings)
+    elif args.command == "serving":
+        serving(settings, dataset_selection(parser, args, V15), args.concurrency)
     elif args.command == "serve-model":
         serve_model(settings)
     elif args.command == "serve-judge":

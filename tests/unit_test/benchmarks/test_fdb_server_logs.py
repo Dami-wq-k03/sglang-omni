@@ -26,12 +26,15 @@ from benchmarks.duplex.fdb.common import (
 from benchmarks.duplex.fdb.servers import RunningServer
 
 WAIT_TIMEOUT_S = 10
+# note (luojiaxuan): the options a subcommand does not parse without.
+REQUIRED_OPTIONS = {"serving": ["--concurrency", "1"]}
 SUBCOMMANDS = (
     "setup",
     "generate",
     "asr",
     "judge",
     "aggregate",
+    "serving",
     "serve-model",
     "serve-judge",
     "env",
@@ -67,8 +70,11 @@ def test_every_subcommand_takes_a_log_level_that_defaults_to_info() -> None:
     # fails here until it joins SUBCOMMANDS.
     assert "{" + ",".join(SUBCOMMANDS) + "}" in parser.format_usage()
     for name in SUBCOMMANDS:
-        assert parser.parse_args([name]).log_level == "info"
-        assert parser.parse_args([name, "--log-level", "debug"]).log_level == "debug"
+        command = [name, *REQUIRED_OPTIONS.get(name, [])]
+        assert parser.parse_args(command).log_level == "info"
+        assert parser.parse_args([*command, "--log-level", "debug"]).log_level == (
+            "debug"
+        )
     with pytest.raises(SystemExit):
         parser.parse_args(["judge", "--log-level", "warning"])
 

@@ -202,9 +202,32 @@ Each repeat writes these files under `$FDB_WORK/runs/RUN_NAME/repeat-N/`:
 
 With `JUDGE=qwen`, the "Official behavior label distribution" section of `report.txt` shows `0 / 0` and `not_prepared`, because that section counts GPT-4o labels only; the Qwen labels are in `judge-qwen/summary.json` and `RESULTS.md`.
 
+## Serving metrics
+
+`serving` measures how the model server keeps up when several sessions share it; it does not score behavior. It starts the model server once with `max_sessions` equal to the largest level, then records the same v1.5 pairs at each level in turn with the v1.5 recorder at that `--concurrency`. Before each level it starts the server's request event recorder with a new `run_id` and the level's own event directory (`POST /start_request_profile`), and stops it after the level (`POST /stop_request_profile`); see [Full Duplex session Unit metrics](profiler.md#full-duplex-session-unit-metrics).
+
+```bash
+python -m benchmarks.duplex.fdb serving --run-name minicpmo-serving --concurrency 1,2,4,8
+```
+
+The default selection is the first 4 pairs of every v1.5 category (32 sessions per level); the `--v15-*` options of [Choosing samples](#choosing-samples) also work here. `max_sessions` reserves GPU memory for every session, so the largest level must fit on the GPU.
+
+Each level is one row. Passed variants, input pacing violations (sessions whose input drifted more than one 80 ms packet from its real-time schedule), variants with HTTP 503 admission denials and the initial delay (first input append to the first output in the simulated client playout) come from the recorder's `run.json`. The Unit counts, the ready-to-first-output and ready-to-finished latencies, the thinker's `service_ms` p95 and the deadline misses are server-side and come from the request event recorder.
+
+A deadline miss is a finished Unit whose ready-to-finished time exceeds the profile's nominal Unit length, 1000 ms for MiniCPM-o. Input arrives in real time, so the next Unit is ready one nominal Unit later, and a Unit that takes longer leaves the server behind its input. The comparison uses the nominal length, not the Unit's own audio length: the last Unit of a session holds only the remaining audio, and comparing it with that shorter length counts misses that delay nothing.
+
+The latencies are measured under load and are not comparable to those of behavior runs at concurrency 1. `serving` writes these files under `$FDB_WORK/runs/RUN_NAME/` and refuses a run that already holds `serving/`:
+
+| Path | Content |
+|---|---|
+| `SERVING.md` | The table `serving` prints, one row per level |
+| `serving.json` | The same rows with the full latency distributions |
+| `serving/sample-ids.txt`, `serving/logs/model-server.log` | The selected pairs and the server log |
+| `serving/concurrency-N/` | One level: the recording (`recording/shard-0/`, whose `run.json` holds the `load` block), the request events (`events/`) and the recorder log (`logs/`) |
+
 ## Settings
 
-Per-run choices (`--run-name`, `--repeat`, sample selection, `--num-shards`, `--log-level`) are command options; `--help` on any subcommand lists them. Machine settings are environment variables, read in `benchmarks/duplex/fdb/common.py`:
+Per-run choices (`--run-name`, `--repeat`, sample selection, `--num-shards`, `--concurrency`, `--log-level`) are command options; `--help` on any subcommand lists them. Machine settings are environment variables, read in `benchmarks/duplex/fdb/common.py`:
 
 | Variable | Default | Meaning |
 |---|---|---|

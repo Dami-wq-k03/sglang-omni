@@ -155,12 +155,21 @@ def test_model_server_command_launches_the_duplex_pipeline(
     )
     launch_server = Mock()
     monkeypatch.setattr("sglang_omni.cli.serve.launch_server", launch_server)
-    server_command = model_server_command(load_settings("isolation"))
+    settings = load_settings("isolation")
+    for options, max_sessions in (
+        ((), DEFAULT_MAX_SESSIONS),
+        (("--max_sessions", "8"), 8),
+    ):
+        server_command = model_server_command(settings, *options)
 
-    result = CliRunner().invoke(app, server_command[server_command.index("serve") :])
+        result = CliRunner().invoke(
+            app, server_command[server_command.index("serve") :]
+        )
 
-    assert result.exit_code == 0, result.output
-    assert type(launch_server.call_args.args[0]) is MiniCPMODuplexPipelineConfig
+        assert result.exit_code == 0, result.output
+        config = launch_server.call_args.args[0]
+        assert type(config) is MiniCPMODuplexPipelineConfig
+        assert config.max_sessions == max_sessions
 
 
 def test_concurrent_claims_take_different_ports(tmp_path: Path) -> None:

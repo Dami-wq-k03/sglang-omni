@@ -117,6 +117,10 @@ class Settings:
         return self.fdb_work / "judge" / f"port-{self.judge_port}"
 
     @property
+    def server_url(self) -> str:
+        return f"http://127.0.0.1:{self.server_port}"
+
+    @property
     def realtime_url(self) -> str:
         return f"ws://127.0.0.1:{self.server_port}/v1/realtime"
 
