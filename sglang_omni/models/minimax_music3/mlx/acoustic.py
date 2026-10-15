@@ -12,7 +12,7 @@ import torch
 
 from ..acoustic import derive_seed
 from ..chunking import overlap_mel_length
-from ..serial_offload import get_coordinator
+from ..serial_offload import clear_exception_frames, get_coordinator
 from .euler import denoise_chunk
 from .loader import (
     MiniMaxMusic3MlxAcousticModel,
@@ -115,6 +115,39 @@ class MiniMaxMusic3MlxAcousticDecoder:
         initial_latent: mx.array | None = None,
         initial_condition: mx.array | None = None,
         should_abort: Callable[[], bool] | None = None,
+    ) -> tuple[torch.Tensor, mx.array, mx.array]:
+        try:
+            return self.decode_chunk(
+                hidden,
+                seed=seed,
+                chunk_idx=chunk_idx,
+                initial_latent=initial_latent,
+                initial_condition=initial_condition,
+                should_abort=should_abort,
+            )
+        except BaseException as error:
+            if self.serial_offload:
+                try:
+                    mx.synchronize(self.mlx_thread_stream)
+                except BaseException as cleanup_error:
+                    get_coordinator().fail_closed(cleanup_error)
+                    raise
+                initial_latent = None
+                initial_condition = None
+                clear_exception_frames(error)
+            else:
+                pass
+            raise
+
+    def decode_chunk(
+        self,
+        hidden: torch.Tensor,
+        *,
+        seed: int,
+        chunk_idx: int,
+        initial_latent: mx.array | None,
+        initial_condition: mx.array | None,
+        should_abort: Callable[[], bool] | None,
     ) -> tuple[torch.Tensor, mx.array, mx.array]:
         if should_abort is not None and should_abort():
             raise InterruptedError("MiniMax Music 3 MLX acoustic generation aborted")

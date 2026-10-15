@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from sglang_omni.models.minimax_music3 import acoustic
+from sglang_omni.models.minimax_music3.model_runner import MiniMaxMusic3ModelRunner
 from sglang_omni.models.minimax_music3.serial_offload import (
     STALL_REPORT_SECONDS,
     SerialOffloadCoordinator,
@@ -343,6 +347,93 @@ def test_acoustic_scheduler_releases_only_the_current_owner(
     scheduler.abort("req-current")
     assert decoder.release_calls == 1
     assert coordinator.try_acquire_ar("req-next")
+
+
+@pytest.mark.parametrize("abort_before_terminal", [True, False])
+def test_acoustic_abort_during_ar_terminal_releases_after_unloading(
+    monkeypatch: pytest.MonkeyPatch,
+    abort_before_terminal: bool,
+) -> None:
+    coordinator = registered_coordinator()
+    monkeypatch.setattr(acoustic, "get_coordinator", lambda: coordinator)
+    releases: list[str] = []
+    scheduler = acoustic.MiniMaxMusic3AcousticScheduler(
+        SimpleNamespace(
+            serial_offload=True,
+            release_residency=lambda: releases.append("acoustic"),
+        )
+    )
+    unloading_started = threading.Event()
+    finish_unloading = threading.Event()
+    residency = coordinator.ar_residency
+    sleep = residency.sleep
+
+    def blocked_sleep() -> None:
+        unloading_started.set()
+        assert finish_unloading.wait(timeout=5)
+        sleep()
+
+    monkeypatch.setattr(residency, "sleep", blocked_sleep)
+    assert coordinator.try_acquire_ar("cancelled")
+    runner = MiniMaxMusic3ModelRunner.__new__(MiniMaxMusic3ModelRunner)
+    runner.serial_offload = coordinator
+    runner.request_data = {}
+    runner.dump_reference_ranks = lambda state: None
+    request_data = SimpleNamespace(
+        ar_state=SimpleNamespace(
+            generated_frames=1,
+            emitted_windows=100,
+            finish_reason="stop",
+            frames=SimpleNamespace(peak_frames=1),
+            started_s=time.perf_counter(),
+        ),
+        minimax_state=SimpleNamespace(),
+        prompt_tokens=1,
+    )
+    if abort_before_terminal:
+        scheduler.abort("cancelled")
+    errors: list[BaseException] = []
+
+    def finish_request() -> None:
+        try:
+            runner.on_request_finished("cancelled", request_data)
+            runner.reset_request("cancelled")
+        except BaseException as error:
+            errors.append(error)
+
+    terminal_thread = threading.Thread(target=finish_request)
+    terminal_thread.start()
+    try:
+        assert unloading_started.wait(timeout=5)
+        scheduler.abort("cancelled")
+        scheduler.abort("cancelled")
+        assert not coordinator.try_acquire_ar("next")
+        assert releases == []
+    finally:
+        finish_unloading.set()
+        terminal_thread.join(timeout=5)
+    assert not terminal_thread.is_alive()
+    assert errors == []
+    assert scheduler.is_aborted("cancelled")
+    assert releases == ["acoustic"]
+    assert residency.resident
+    assert coordinator.try_acquire_ar("next")
+
+
+def test_cancel_ar_clears_early_consumer_retirement() -> None:
+    coordinator = registered_coordinator()
+    released: list[str] = []
+    assert coordinator.try_acquire_ar("cancelled")
+    coordinator.end_dit_handoff(
+        "cancelled", release_acoustic=lambda: released.append("cancelled")
+    )
+    coordinator.cancel_ar("cancelled")
+    assert coordinator.try_acquire_ar("next")
+    coordinator.begin_dit_handoff("next")
+    assert not coordinator.try_acquire_ar("third")
+    coordinator.end_dit_handoff("next")
+    assert coordinator.try_acquire_ar("third")
+    assert released == []
 
 
 def test_residency_sleep_and_wake_preserve_weights_and_state() -> None:

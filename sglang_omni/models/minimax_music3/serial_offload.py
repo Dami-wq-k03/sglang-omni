@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import traceback
 from collections.abc import Callable
 
 import torch
@@ -29,6 +30,25 @@ logger = logging.getLogger(__name__)
 
 STALL_REPORT_SECONDS = 900.0
 BYTES_PER_GIB = 1024.0**3
+
+
+def clear_exception_frames(error: BaseException) -> None:
+    """Drop tensors in unwound tracebacks, including chained exceptions."""
+    logger.error("".join(traceback.format_exception(error)))
+    pending_errors = [error]
+    seen_errors: set[int] = set()
+    while pending_errors:
+        current_error = pending_errors.pop()
+        if id(current_error) in seen_errors:
+            continue
+        else:
+            seen_errors.add(id(current_error))
+        traceback.clear_frames(current_error.__traceback__)
+        for chained_error in (current_error.__cause__, current_error.__context__):
+            if chained_error is not None:
+                pending_errors.append(chained_error)
+            else:
+                pass
 
 
 def owned_tensors(
@@ -194,6 +214,8 @@ class SerialOffloadCoordinator:
         self.failure: BaseException | None = None
         self.paused_at_seconds: float | None = None
         self.has_reported_stall = False
+        self.has_retired_acoustic = False
+        self.pending_acoustic_release: Callable[[], None] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -305,14 +327,21 @@ class SerialOffloadCoordinator:
             raise
 
         with self.condition:
+            self.raise_if_failed_locked()
             self.phase = "acoustic"
             self.paused_at_seconds = time.monotonic()
             self.has_reported_stall = False
+            has_retired_acoustic = self.has_retired_acoustic
+            release_acoustic = self.pending_acoustic_release
             self.condition.notify_all()
         logger.info(
             f"MiniMax Music 3 serial offload: AR -> CPU (DIT/DAV's turn, "
             f"request={request_id})"
         )
+        if has_retired_acoustic:
+            self.end_dit_handoff(request_id, release_acoustic=release_acoustic)
+        else:
+            pass
 
     def require_acoustic(self, request_id: str) -> None:
         """Reject compute that is not owned by the active acoustic request."""
@@ -348,7 +377,16 @@ class SerialOffloadCoordinator:
             pass
         with self.condition:
             self.raise_if_failed_locked()
-            if self.owner_request_id != request_id or self.phase != "acoustic":
+            if self.owner_request_id != request_id:
+                return
+            elif self.phase in {"ar", "ar_unloading"}:
+                if not self.has_retired_acoustic:
+                    self.has_retired_acoustic = True
+                    self.pending_acoustic_release = release_acoustic
+                else:
+                    pass
+                return
+            elif self.phase != "acoustic":
                 return
             else:
                 pass
@@ -372,6 +410,8 @@ class SerialOffloadCoordinator:
             self.phase = "idle"
             self.paused_at_seconds = None
             self.has_reported_stall = False
+            self.has_retired_acoustic = False
+            self.pending_acoustic_release = None
             self.condition.notify_all()
         logger.info(
             f"MiniMax Music 3 serial offload: AR -> GPU (AR's turn, "
@@ -391,6 +431,8 @@ class SerialOffloadCoordinator:
                 pass
             self.owner_request_id = None
             self.phase = "idle"
+            self.has_retired_acoustic = False
+            self.pending_acoustic_release = None
             self.condition.notify_all()
 
     def record_failure(self, exc: BaseException) -> None:
