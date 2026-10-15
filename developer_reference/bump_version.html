@@ -845,15 +845,12 @@ inherited upstream change a user can observe, and the A/B with both arms’
 commits and image digests, sample counts and the profiler attribution for
 any delta outside noise. Measurements and inferences are labeled as what
 they are.</p>
-<p>GPU CI needs the <code class="docutils literal notranslate"><span class="pre">run-ci</span></code> label. Model selectors choose presets within each
-family: TTS (<code class="docutils literal notranslate"><span class="pre">run-higgs</span></code>, <code class="docutils literal notranslate"><span class="pre">run-moss</span></code>, <code class="docutils literal notranslate"><span class="pre">run-qwen3-tts</span></code>, <code class="docutils literal notranslate"><span class="pre">run-cosyvoice3</span></code>,
-<code class="docutils literal notranslate"><span class="pre">run-qwen3-tts-custom-voice</span></code>), ASR (<code class="docutils literal notranslate"><span class="pre">run-fun-asr</span></code>, <code class="docutils literal notranslate"><span class="pre">run-qwen3-asr</span></code>,
-<code class="docutils literal notranslate"><span class="pre">run-whisper-asr</span></code>), and Omni (<code class="docutils literal notranslate"><span class="pre">run-qwen3-omni</span></code>, <code class="docutils literal notranslate"><span class="pre">run-minicpmo</span></code>). Apply them
-with <code class="docutils literal notranslate"><span class="pre">/tag-and-rerun-ci</span> <span class="pre">&lt;selectors&gt;</span></code>, for example
-<code class="docutils literal notranslate"><span class="pre">/tag-and-rerun-ci</span> <span class="pre">moss</span> <span class="pre">fun-asr</span> <span class="pre">minicpmo</span></code>. The Omni model defaults to
-Qwen3-Omni. The
-selectors within a family are exclusive, so each preset gets its own run on
-the new image before merge.</p>
+<p>Run CI with <code class="docutils literal notranslate"><span class="pre">run-all-ci</span></code>. A stage without a model label draws its model at
+random, so give each preset its own run on the new image before merge: keep
+<code class="docutils literal notranslate"><span class="pre">run-all-ci</span></code> and add one model label per stage, for example
+<code class="docutils literal notranslate"><span class="pre">run-tts-moss-tts-local-transformer-v1.5</span></code>, <code class="docutils literal notranslate"><span class="pre">run-asr-fun-asr-nano-2512</span></code> and
+<code class="docutils literal notranslate"><span class="pre">run-omni-minicpm-o-4.5</span></code>. The model labels within a stage are exclusive. The
+CI section of the pull request template lists every label.</p>
 <p>After the merge, everyone pulls the new image and rebuilds their
 virtualenvs; an environment built against the old pins does not run <code class="docutils literal notranslate"><span class="pre">main</span></code>.</p>
 <p>A full CI calibration must follow the merge. The new stack moves throughput
