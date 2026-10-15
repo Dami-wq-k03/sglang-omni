@@ -46,6 +46,7 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
 
     var onTranscriptionFinished: ((String) -> Void)?
     var onPartialTranscription: ((String) -> Void)?
+    var onRuntimeFailure: ((String) -> Void)?
     var dictionaryEntryProvider: (() -> [DictionaryEntry])?
 
     private let audioEngine = AVAudioEngine()
@@ -102,6 +103,7 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
     private var nativeQwenLiveUsesAutomaticLanguageProtocol = false
     var sessionAllowsRealtimeTextDisplay = true
     private var didRetryCaptureStartup = false
+    private var didRetryNativeLiveSession = false
     private var activeCaptureUsesPreferredInputDevice = false
     private var loggedSampleExtractionFailure = false
     private var activeSessionBehavior = MLXModelManager.transcriptionBehavior(
@@ -342,6 +344,7 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
         isFinalizingTranscription = false
         onTranscriptionFinished = nil
         onPartialTranscription = nil
+        onRuntimeFailure = nil
     }
 
     /// Releases the reusable capture runtime after the model-level idle timeout has elapsed.
@@ -372,6 +375,7 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
         isEnhancing = false
         onTranscriptionFinished = nil
         onPartialTranscription = nil
+        onRuntimeFailure = nil
         dictionaryEntryProvider = nil
         return true
     }
@@ -605,6 +609,7 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
         isModelInitializing = false
         onTranscriptionFinished = nil
         onPartialTranscription = nil
+        onRuntimeFailure = nil
         dictionaryEntryProvider = nil
         unpinModelForSessionIfNeeded()
     }
@@ -743,6 +748,7 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
         isModelInitializing = false
         isFinalizingTranscription = false
         didRetryCaptureStartup = false
+        didRetryNativeLiveSession = false
         activeCaptureUsesPreferredInputDevice = preferredInputDeviceID != nil
         stableCommittedText = ""
         lastCandidateText = ""
@@ -1118,60 +1124,74 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
         }
     }
 
-    private func startNativeLiveSession(revision: Int) {
+    @discardableResult
+    func startNativeLiveSession(revision: Int) -> Task<Void, Never> {
         liveSessionSetupTasks.cancelAll()
         let expectedMode = activeLiveMode
-        liveSessionSetupTasks.start { [weak self] in
+        return liveSessionSetupTasks.start { [weak self] in
             guard let self else { return }
             let startedAt = Date()
             let manager = self.modelManager
             manager.beginActiveUse()
             var transferredModelUse = false
             defer { if !transferredModelUse { manager.endActiveUse() } }
-            do {
-                let loaded = try await manager.loadModel()
-                guard !Task.isCancelled, revision == self.sessionRevision,
-                      self.isRecording, self.activeLiveMode == expectedMode else { return }
-                let releaseModel: @MainActor () -> Void = { manager.endActiveUse() }
-                if let runtime = loaded.omniRuntime {
-                    guard try await self.installOmniLiveSession(
-                        runtime: runtime,
-                        mode: expectedMode,
-                        revision: revision,
-                        releaseModel: releaseModel
-                    ) else { return }
+            for _ in 0..<2 {
+                do {
+                    guard !Task.isCancelled, revision == self.sessionRevision,
+                          self.isRecording, self.activeLiveMode == expectedMode else { return }
+                    let loaded = try await manager.loadModel()
+                    guard !Task.isCancelled, revision == self.sessionRevision,
+                          self.isRecording, self.activeLiveMode == expectedMode else { return }
+                    let releaseModel: @MainActor () -> Void = { manager.endActiveUse() }
+                    if let runtime = loaded.omniRuntime {
+                        guard try await self.installOmniLiveSession(
+                            runtime: runtime,
+                            mode: expectedMode,
+                            revision: revision,
+                            releaseModel: releaseModel
+                        ) else { return }
+                        transferredModelUse = true
+                        self.isModelInitializing = false
+                        VoxtLog.asr("Omni live session ready. repo=\(manager.currentModelRepo), mode=\(String(describing: expectedMode)), elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))", verbose: true)
+                        return
+                    }
+                    guard let model = loaded.mlxModel else { return }
+                    defer {
+                        if !transferredModelUse {
+                            VoxtLog.asrWarning("MLX native live requested for incompatible model. repo=\(manager.currentModelRepo), mode=\(String(describing: expectedMode))")
+                        }
+                    }
+                    switch expectedMode {
+                    case .nativeQwenLive:
+                        guard let model = model as? Qwen3ASRModel else { return }
+                        self.installNativeQwenLiveSession(model, revision: revision, releaseModel: releaseModel)
+                    case .nativeStreamingLive:
+                        guard model is CohereTranscribeModel || model is MossTranscribeDiarizeModel else { return }
+                        self.installNativeStreamingLiveSession(model, revision: revision, releaseModel: releaseModel)
+                    case .nativeNemotronLive:
+                        guard let model = model as? NemotronASRModel else { return }
+                        self.installNativeNemotronLiveSession(model, revision: revision, releaseModel: releaseModel)
+                    case .batchPreview:
+                        return
+                    }
                     transferredModelUse = true
                     self.isModelInitializing = false
-                    VoxtLog.asr("Omni live session ready. repo=\(manager.currentModelRepo), mode=\(String(describing: expectedMode)), elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))", verbose: true)
+                    let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                    VoxtLog.asr("MLX native live session ready. repo=\(manager.currentModelRepo), mode=\(String(describing: expectedMode)), elapsedMs=\(elapsedMs)", verbose: true)
                     return
-                }
-                guard let model = loaded.mlxModel else { return }
-                defer {
-                    if !transferredModelUse {
-                        VoxtLog.asrWarning("MLX native live requested for incompatible model. repo=\(manager.currentModelRepo), mode=\(String(describing: expectedMode))")
+                } catch {
+                    guard !Task.isCancelled, revision == self.sessionRevision,
+                          self.isRecording, self.activeLiveMode == expectedMode else { return }
+                    if !self.didRetryNativeLiveSession {
+                        self.didRetryNativeLiveSession = true
+                        VoxtLog.asrWarning("MLX native live setup failed; retrying once. repo=\(manager.currentModelRepo), error=\(error.localizedDescription)")
+                        do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                        continue
                     }
-                }
-                switch expectedMode {
-                case .nativeQwenLive:
-                    guard let model = model as? Qwen3ASRModel else { return }
-                    self.installNativeQwenLiveSession(model, revision: revision, releaseModel: releaseModel)
-                case .nativeStreamingLive:
-                    guard model is CohereTranscribeModel || model is MossTranscribeDiarizeModel else { return }
-                    self.installNativeStreamingLiveSession(model, revision: revision, releaseModel: releaseModel)
-                case .nativeNemotronLive:
-                    guard let model = model as? NemotronASRModel else { return }
-                    self.installNativeNemotronLiveSession(model, revision: revision, releaseModel: releaseModel)
-                case .batchPreview:
+                    self.reportNativeLiveFailure(error.localizedDescription)
+                    VoxtLog.asrWarning("MLX native live setup failed. repo=\(manager.currentModelRepo), mode=\(String(describing: expectedMode)), error=\(error.localizedDescription)")
                     return
                 }
-                transferredModelUse = true
-                self.isModelInitializing = false
-                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
-                VoxtLog.asr("MLX native live session ready. repo=\(manager.currentModelRepo), mode=\(String(describing: expectedMode)), elapsedMs=\(elapsedMs)", verbose: true)
-            } catch {
-                guard !Task.isCancelled, revision == self.sessionRevision else { return }
-                self.isModelInitializing = false
-                VoxtLog.asrWarning("MLX native live setup failed. repo=\(manager.currentModelRepo), mode=\(String(describing: expectedMode)), error=\(error.localizedDescription)")
             }
         }
     }
@@ -1317,7 +1337,7 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
         )
     }
 
-    private func releaseNativeLiveSession(cancelSession: Bool) {
+    func releaseNativeLiveSession(cancelSession: Bool) {
         nativeLiveRuntime.release(cancelSession: cancelSession)
     }
 
@@ -1448,14 +1468,27 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
                 publishPartial(normalized)
             }
         case .failed(let failure):
-            pendingRuntimeFailureMessage = failure.localizedDescription
+            releaseNativeLiveSession(cancelSession: true)
+            if isRecording, !didRetryNativeLiveSession {
+                didRetryNativeLiveSession = true
+                isModelInitializing = true
+                VoxtLog.asrWarning("MLX native streaming session failed; retrying once. repo=\(modelManager.currentModelRepo), error=\(failure.localizedDescription)")
+                startNativeLiveSession(revision: revision)
+                return
+            }
+            reportNativeLiveFailure(failure.localizedDescription)
             VoxtLog.asrError(
                 "MLX native streaming session failed. repo=\(modelManager.currentModelRepo), error=\(failure.localizedDescription)"
             )
-            releaseNativeLiveSession(cancelSession: false)
         case .confirmed, .provisional, .stats:
             break
         }
+    }
+
+    private func reportNativeLiveFailure(_ message: String) {
+        isModelInitializing = false
+        pendingRuntimeFailureMessage = message
+        onRuntimeFailure?(AppLocalization.localizedString("Live transcription failed. Stop recording and try again."))
     }
 
     private func startEarlyModelPrewarmIfNeeded() {

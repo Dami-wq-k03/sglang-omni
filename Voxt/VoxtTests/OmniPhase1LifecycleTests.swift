@@ -115,6 +115,51 @@ final class OmniPhase1LifecycleTests: XCTestCase {
 
     // MARK: - Faults
 
+    func testRepeatedLiveActivationsProducePreviewAcrossIdleUnloads() async throws {
+        let fixtures = try fixtures()
+        let manager = try await makeManager()
+        let records = try fixtures.output.map { try LifecycleRecords($0) }
+
+        for round in 1...fixtures.rounds {
+            let transcriber = MLXTranscriber(modelManager: manager)
+            let preview = expectation(description: "live preview for activation \(round)")
+            preview.assertForOverFulfill = false
+            transcriber.onPartialTranscription = { _ in preview.fulfill() }
+            transcriber.onRuntimeFailure = { message in XCTFail(message) }
+            transcriber.isRecording = true
+            transcriber.configureVoiceActivityFinalizationFiltering(enabled: true)
+            transcriber.appendVoiceActivityFinalizationFrame(
+                ASRVoiceActivityAudioFrame(
+                    samples: fixtures.short.samples,
+                    sampleRate: fixtures.short.sampleRate,
+                    startSeconds: 0,
+                    endSeconds: Double(fixtures.short.samples.count) / fixtures.short.sampleRate,
+                    level: 0.5
+                ),
+                isSpeech: true
+            )
+
+            await transcriber.startNativeLiveSession(revision: 0).value
+            await fulfillment(of: [preview], timeout: 15)
+            XCTAssertFalse(transcriber.transcribedText.isEmpty, "Live activation \(round) produced no preview")
+            records?.write(["event": "live_round", "round": round, "preview_characters": transcriber.transcribedText.count])
+            transcriber.isRecording = false
+            transcriber.releaseNativeLiveSession(cancelSession: true)
+            let deadline = ContinuousClock.now + .seconds(5)
+            while manager.hasActiveUse, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertFalse(manager.hasActiveUse, "Live activation \(round) retained its model use")
+            if round.isMultiple(of: 10) {
+                manager.releaseLoadedModelIfIdle(reason: "live-activation-regression")
+            }
+        }
+
+        await manager.shutdownForApplicationTermination()
+        let gone = await ProcessTree.waitUntilNoDescendants(timeoutSeconds: 10)
+        XCTAssertTrue(gone)
+    }
+
     /// A server crash mid-Final fails that request, and the next load starts a
     /// fresh server that serves the next Final.
     func testServerKilledDuringFinalFailsThatRequestAndRecovers() async throws {

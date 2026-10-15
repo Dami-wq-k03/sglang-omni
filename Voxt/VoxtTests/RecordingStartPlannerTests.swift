@@ -23,6 +23,17 @@ final class RecordingStartPlannerTests: XCTestCase {
         XCTAssertEqual(decision, .blocked(.mlxModelUnavailable(detail: "broken")))
     }
 
+    func testInstalledMLXModelCanRetryAfterRuntimeLoadFailure() {
+        XCTAssertEqual(
+            RecordingStartPlanner.resolve(
+                selectedEngine: .mlxAudio,
+                isSelectedMLXModelDownloaded: true,
+                mlxModelState: .error("Model load failed: server exited")
+            ),
+            .start(.mlxAudio)
+        )
+    }
+
     func testMLXAudioDownloadedStartsWithMLXAudio() {
         let decision = RecordingStartPlanner.resolve(
             selectedEngine: .mlxAudio,

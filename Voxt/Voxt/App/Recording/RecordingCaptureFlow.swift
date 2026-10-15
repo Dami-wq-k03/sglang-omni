@@ -60,6 +60,12 @@ extension AppDelegate {
         mlx.onPartialTranscription = { [weak self] text in
             self?.handleLiveASRPartialTranscription(text, sessionID: sessionID)
         }
+        mlx.onRuntimeFailure = { [weak self] message in
+            guard let self, self.shouldHandleCallbacks(for: sessionID), self.isSessionActive else { return }
+            self.overlayStatusClearTask?.cancel()
+            self.overlayStatusClearTask = nil
+            self.overlayState.statusMessage = message
+        }
         mlx.onTranscriptionFinished = { [weak self] text in
             self?.stashPendingCompletedHistoryAudioArchive(self?.mlxTranscriber?.consumeCompletedAudioArchiveURL())
             self?.processTranscription(text, sessionID: sessionID)

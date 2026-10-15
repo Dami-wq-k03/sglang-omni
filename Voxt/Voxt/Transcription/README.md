@@ -21,3 +21,5 @@ ASR model construction is in `MLXSTTModelLoader`. Catalog/state values and reusa
 This is not a native decode/Metal completion barrier: the dependency's synchronous `cancel()` has no awaitable internal-worker completion API. Verify actual model memory/cancellation behavior separately.
 
 Keep `nonisolated` inference, cancellation propagation and the existing buffer locks intact when moving code. The source split does not introduce another model/session owner. See the [phase record](../../docs/RefactoringProgress.zh-CN.md) before changing runtime ownership.
+
+Native live ASR shares one retry per recording across model setup and streaming connection failures while the recording session remains current. A second failure is retained for finalization and shown immediately in the recording overlay; microphone capture remains available for the stop-time final pass. Stopped or cancelled sessions neither retry nor report a stale failure. A validated installed model remains eligible for the next activation after a runtime load error, without requiring an application restart.

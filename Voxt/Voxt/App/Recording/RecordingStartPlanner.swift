@@ -186,7 +186,7 @@ enum RecordingStartPlanner {
             }
             return isSelectedModelDownloaded ? .ready : .notDownloaded
         case .unavailable:
-            return .unavailable(unavailableDetail)
+            return isSelectedModelDownloaded ? .ready : .unavailable(unavailableDetail)
         }
     }
 
