@@ -239,12 +239,18 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
     sessions_failed = sum(
         variant_state["status"] in FAILED_STATUSES for variant_state in attempted
     )
-    real_time_factor = quantiles(
-        [
-            reply["real_time_factor"]
-            for reply in replies
-            if reply["real_time_factor"] is not None
-        ]
+    # note (jeffro): a native reply comes out one unit per input unit, so its
+    # real-time factor tracks the input pace.
+    real_time_factor = (
+        None
+        if is_native
+        else quantiles(
+            [
+                reply["real_time_factor"]
+                for reply in replies
+                if reply["real_time_factor"] is not None
+            ]
+        )
     )
     if is_native:
         units_expected = failed_units + sum(

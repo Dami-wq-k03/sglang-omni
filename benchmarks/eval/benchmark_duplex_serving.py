@@ -32,12 +32,16 @@ def ratio(value: JsonValue, form: str) -> str:
 
 def format_table(report: dict[str, JsonValue]) -> str:
     rows = [
-        "| N | mean open | sessions failed | 503 | pacing violations | unit miss "
-        "| unit lag p50 / p90 / p99 (ms) | first audio p50 / p90 (ms) "
-        "| buffer needed p50 / p90 (ms) | underrun replies | RTF p90 | meets targets |",
+        (
+            "| N | mean open | sessions failed | 503 | pacing violations | unit miss "
+            "| unit lag p50 / p90 / p99 (ms) | first audio p50 / p90 (ms) "
+            "| buffer needed p50 / p90 (ms) | underrun replies | RTF p90 "
+            "| meets targets |"
+        ),
         "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for level in report["levels"]:
+        real_time_factor = level["real_time_factor"]
         unit_lag = level["unit_lag_s"]
         first_audio = level["first_audio_latency_s"]
         buffer_needed = level["startup_buffer_needed_s"]
@@ -52,7 +56,7 @@ def format_table(report: dict[str, JsonValue]) -> str:
             f"| {milliseconds(buffer_needed['p50'])} / "
             f"{milliseconds(buffer_needed['p90'])} "
             f"| {level['replies_with_underrun']}/{level['replies']} "
-            f"| {ratio(level['real_time_factor']['p90'], '.2f')} "
+            f"| {ratio(None if real_time_factor is None else real_time_factor['p90'], '.2f')} "
             f"| {'yes' if not level['unmet_targets'] else '; '.join(level['unmet_targets'])} |"
         )
     capacity = report["max_concurrency_meeting_targets"]

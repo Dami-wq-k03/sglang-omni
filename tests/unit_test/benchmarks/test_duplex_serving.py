@@ -237,6 +237,7 @@ def test_level_counts_every_unit_of_a_failed_session_as_missed(tmp_path: Path) -
     assert level["unit_lag_s"]["count"] == 3
     # Spans 101.16-102.7 and 101.16-102.5 over 1.54 s.
     assert level["mean_open_sessions"] == pytest.approx(2.88 / 1.54)
+    assert level["real_time_factor"] is None
     assert level["unmet_targets"] == [
         "no failed sessions",
         "unit miss rate at most 1%",
