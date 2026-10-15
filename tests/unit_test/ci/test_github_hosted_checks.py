@@ -11,11 +11,15 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW_DIRECTORY = REPO_ROOT / ".github/workflows"
-ALWAYS_RUN_WORKFLOWS = (
+ALWAYS_RUN_JOB_WORKFLOWS = (
     "lint.yaml",
     "test-layout.yaml",
     "docs-check.yaml",
     "rust-router.yml",
+)
+ALWAYS_RUN_WORKFLOWS = (
+    *ALWAYS_RUN_JOB_WORKFLOWS,
+    "release-docker-npu-nightly.yml",
 )
 SELF_HOSTED_GATE_JOBS = (
     ("omni-ci.yaml", "preflight"),
@@ -46,7 +50,7 @@ def test_github_hosted_workflow_starts_on_every_pull_request(
         assert pull_request_trigger == ""
 
 
-@pytest.mark.parametrize("workflow_name", ALWAYS_RUN_WORKFLOWS)
+@pytest.mark.parametrize("workflow_name", ALWAYS_RUN_JOB_WORKFLOWS)
 def test_github_hosted_jobs_have_no_label_or_path_condition(
     workflow_name: str,
 ) -> None:

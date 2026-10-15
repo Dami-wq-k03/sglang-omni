@@ -12,6 +12,7 @@ This page goes through the workflows in order. Each section first says what runs
 | Test Layout | GitHub-hosted | Test file location check | Every pull request |
 | Docs Check | GitHub-hosted | Sphinx documentation build | Every pull request |
 | Rust Router | GitHub-hosted | Rust router format, lint, tests and release build | Every pull request |
+| Release Docker Images Nightly (NPU) | GitHub-hosted | NPU configuration checks and an ARM64 image build | Every pull request |
 | Omni CI | H100 | PR Test, then the ASR, TTS, MPS and Omni stages | Any stage label |
 | CPU CI | Intel Xeon (`intel-omni-spr`) | Intel CPU unit tests | `run-intel-cpu-ci` or `run-all-ci` |
 | XPU CI | Intel GPU (`intel-omni-bmg`) | Intel GPU device layer tests | `run-intel-xpu-ci` or `run-all-ci` |
@@ -30,12 +31,11 @@ These workflows run on GitHub-hosted runners for every pull request, drafts incl
 | Test Layout | `test-layout` | Every Python file under `tests/` lives in `tests/unit_test/`, `tests/test_model/`, `tests/test_ci/` or `tests/utils/`. |
 | Docs Check | `build-docs` | The documentation builds with `docs/requirements.txt`. |
 | Rust Router | `quality` | `cargo fmt`, a check on the minimum supported Rust version, Clippy with warnings as errors, the tests, the docs, a release build, and `--check-config` on every example config. |
+| Release Docker Images Nightly (NPU) | `preprocess`, `build_and_publish_arm64` | The NPU configuration and installer tests without hardware, then an ARM64 build of `docker/npu.Dockerfile`, which copies the whole repository. Pull requests never publish the image, and a new push cancels the build still running for the previous one. |
 
 The `lint` check is required: a pull request cannot merge into `main` until it passes. Lint takes about two minutes; its pre-commit hook environments are cached, and every push to `main` refreshes that cache.
 
 Lint also comes first for the self-hosted CI. The gate job of every self-hosted workflow waits until the `lint` check on the same commit succeeds and the pull request has no merge conflict. A lint failure or a merge conflict therefore stops self-hosted CI before it takes a runner.
-
-The NPU image workflow (Release Docker Images Nightly) also runs on GitHub-hosted runners, but only for pull requests that change the NPU Dockerfile, NPU configuration, NPU installer or their tests. It checks the NPU configuration and installer without hardware and builds the ARM64 image without publishing it. A full image build takes 10 to 15 minutes, so it does not run for unrelated pull requests.
 
 A pull request from a fork whose author has not had a pull request merged yet waits for a maintainer to click "Approve and run" before any workflow starts, these checks included. This approval stays on because a fork can edit a workflow file to run its own code on the self-hosted runners.
 
