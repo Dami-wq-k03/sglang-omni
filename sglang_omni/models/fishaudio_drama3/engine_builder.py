@@ -157,6 +157,8 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
 
     def adjust_overrides(self, overrides: dict[str, object]) -> None:
         overrides.setdefault("page_size", 1)
+        # The checkpoint declares float32 SSM state; bf16 halves that cache's traffic.
+        overrides.setdefault("mamba_ssm_dtype", "bfloat16")
 
     def validate_before_infrastructure(self, server_args: ServerArgs) -> None:
         attention_backends = {

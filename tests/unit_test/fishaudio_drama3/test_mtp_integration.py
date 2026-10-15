@@ -2342,6 +2342,7 @@ def test_engine_defaults_pass_its_own_validation(tmp_path: Path) -> None:
     builder.validate_before_infrastructure(server_args)
     graph_config = resolved_view(server_args).cuda_graph_config
     assert server_args.page_size == 1
+    assert server_args.mamba_ssm_dtype == "bfloat16"
     assert server_args.chunked_prefill_size == -1
     assert not server_args.disable_cuda_graph
     assert graph_config.decode.backend == CudaGraphBackend.FULL
@@ -2367,6 +2368,13 @@ def test_engine_context_must_fit_the_tower_rope_table(
     )
     with pytest.raises(ValueError, match="exceeds the model's max_position_embeddings"):
         builder.validate_before_infrastructure(server_args)
+
+
+def test_engine_keeps_an_explicit_ssm_state_dtype(tmp_path: Path) -> None:
+    builder, server_args = engine_server_args(tmp_path, {"mamba_ssm_dtype": "float32"})
+
+    builder.validate_before_infrastructure(server_args)
+    assert server_args.mamba_ssm_dtype == "float32"
 
 
 def test_engine_prefills_without_an_interval_when_asked(tmp_path: Path) -> None:
