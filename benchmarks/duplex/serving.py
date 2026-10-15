@@ -15,17 +15,12 @@ from benchmarks.duplex.oracle_models import MediaTime, TraceRecord, WireEvent
 from benchmarks.duplex.profiles import PROFILES, ProfileName
 
 INPUT_BYTES_PER_MS = SAMPLE_RATE * 2 / 1000
-# note (jeffro): the simulated player starts a reply 80 ms after its first audio
-# arrives, so arrival jitter shorter than that is not counted as underrun.
-PLAYBACK_RESERVE_S = 0.08
 
 
-def score_session(variant_dir: Path, profile: ProfileName) -> dict[str, JsonValue]:
-    """Unit lag, deadline misses and per-reply audio timing as the client saw them.
-
-    A unit is ready when the client finished sending the packet that completes it,
-    or, for the padded last unit, when it sent the input end.
-    """
+def score_session(
+    variant_dir: Path, profile: ProfileName, playback_reserve_s: float
+) -> dict[str, JsonValue]:
+    """Compute 'Unit lag', 'deadline misses' and 'per-reply audio timing' as the client saw them."""
     unit_ms = PROFILES[profile].native_unit_ms
     output_sample_rate = PROFILES[profile].output_sample_rate
     packet_completed_s = {
@@ -55,6 +50,9 @@ def score_session(variant_dir: Path, profile: ProfileName) -> dict[str, JsonValu
         else:
             return event.sglang.media_time
 
+    # note (jeffro): lag starts when the server has all of a unit's input: when the
+    # client finished sending the packet holding the unit's last audio or, for the
+    # short last unit that the server fills with silence, when it sent the input end.
     def ready_s(media_time: MediaTime) -> float:
         end_ms = media_time.t_start_ms + media_time.duration_ms
         packet_ready_s = packet_completed_s[math.ceil(end_ms / PACKET_MS) - 1]
@@ -90,11 +88,19 @@ def score_session(variant_dir: Path, profile: ProfileName) -> dict[str, JsonValu
 
     replies: list[dict[str, JsonValue]] = []
     for response_id, chunks in reply_chunks.items():
-        playback_s = chunks[0][0] + PLAYBACK_RESERVE_S
+        # note (jeffro): the simulated player starts a reply playback_reserve_s after
+        # its first audio arrives.
+        playback_s = chunks[0][0] + playback_reserve_s
         underrun_s = 0.0
+        unbuffered_start_s = chunks[0][0]
+        startup_buffer_needed_s = 0.0
         for arrival_s, audio_s in chunks:
             underrun_s += max(0.0, arrival_s - playback_s)
             playback_s = max(playback_s, arrival_s) + audio_s
+            startup_buffer_needed_s = max(
+                startup_buffer_needed_s, arrival_s - unbuffered_start_s
+            )
+            unbuffered_start_s += audio_s
         # note (jeffro): the last chunk's own playback is not part of the generation
         # time, so the factor covers the audio that arrived before it.
         streamed_audio_s = sum(audio_s for _, audio_s in chunks[:-1])
@@ -102,10 +108,8 @@ def score_session(variant_dir: Path, profile: ProfileName) -> dict[str, JsonValu
         replies.append(
             {
                 "response_id": response_id,
-                # note (jeffro): a reply can open with text one unit before its first
-                # audio. That wait is one unit long by model design, whatever the load,
-                # so latency starts at the unit carrying the first audio and the wait
-                # is counted on its own.
+                # note (jeffro): a reply's first text can come one unit before its first audio,
+                # Latency starts at the unit carrying the first audio, so that unit is not counted as serving time.
                 "first_audio_latency_s": chunks[0][0] - ready_s(first_audio_unit),
                 "units_before_first_audio": round(
                     (
@@ -116,6 +120,7 @@ def score_session(variant_dir: Path, profile: ProfileName) -> dict[str, JsonValu
                 ),
                 "audio_s": sum(audio_s for _, audio_s in chunks),
                 "underrun_s": underrun_s,
+                "startup_buffer_needed_s": startup_buffer_needed_s,
                 "real_time_factor": (
                     (chunks[-1][0] - chunks[0][0]) / streamed_audio_s
                     if len(chunks) > 1
