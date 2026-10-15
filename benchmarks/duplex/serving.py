@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Client-observed serving timing of recorded native duplex sessions."""
+"""Client-observed serving timing of recorded duplex sessions."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE, SEND_RECEIPTS_FILE
 from benchmarks.duplex.oracle_models import MediaTime, TraceRecord, WireEvent
 from benchmarks.duplex.profiles import PROFILES, ProfileName
 from benchmarks.duplex.run_artifacts import load_run
+from benchmarks.duplex.v15_audio import AUDIO_DELTA, LEGACY_AUDIO_DELTA
 
 INPUT_BYTES_PER_MS = SAMPLE_RATE * 2 / 1000
 # note (jeffro): a not_exercised session kept the protocol; its model output just
@@ -23,6 +24,9 @@ INPUT_BYTES_PER_MS = SAMPLE_RATE * 2 / 1000
 SCORED_STATUSES = ("pass", "not_exercised")
 FAILED_STATUSES = ("fail", "error")
 MAX_UNIT_MISS_RATE = 0.01
+# note (jeffro): a turn-based server sends no unit receipt tied to generation, so it
+# keeps up when its replies stream at least as fast as they play.
+MAX_REPLY_REAL_TIME_FACTOR = 1.0
 
 
 def input_units(variant_dir: Path, unit_ms: int) -> int:
@@ -48,6 +52,7 @@ def score_session(
     """Compute 'Unit lag', 'deadline misses' and 'per-reply audio timing' as the client saw them."""
     unit_ms = PROFILES[profile].native_unit_ms
     output_sample_rate = PROFILES[profile].output_sample_rate
+    is_native = PROFILES[profile].protocol == "native"
     packet_completed_s = {
         receipt["seq"]: receipt["completed_s"]
         for receipt in json.loads((variant_dir / SEND_RECEIPTS_FILE).read_text())[
@@ -88,19 +93,29 @@ def score_session(
             return max(packet_ready_s, input_end_s)
 
     unit_lags_s: list[float] = []
+    reply_created_s: dict[str, float] = {}
     reply_opening_unit: dict[str, MediaTime] = {}
     reply_first_audio_unit: dict[str, MediaTime] = {}
     reply_chunks: dict[str, list[tuple[float, float]]] = {}
     for record in (record for record in records if record.direction == "receive"):
         event = WireEvent.model_validate(record.event)
-        if event.type == "sglang.unit.done":
+        if event.type == "sglang.unit.done" and is_native:
             unit_lags_s.append(record.time_s - ready_s(unit_media_time(event)))
         elif event.type == "response.created":
             assert event.response is not None
-            reply_opening_unit[event.response.id] = unit_media_time(event)
-        elif event.type == "response.output_audio.delta":
+            reply_created_s[event.response.id] = record.time_s
+            if is_native:
+                reply_opening_unit[event.response.id] = unit_media_time(event)
+            else:
+                pass
+        elif event.type in (AUDIO_DELTA, LEGACY_AUDIO_DELTA):
             assert event.response_id is not None and event.delta is not None
-            reply_first_audio_unit.setdefault(event.response_id, unit_media_time(event))
+            if is_native:
+                reply_first_audio_unit.setdefault(
+                    event.response_id, unit_media_time(event)
+                )
+            else:
+                pass
             reply_chunks.setdefault(event.response_id, []).append(
                 (
                     record.time_s,
@@ -128,20 +143,28 @@ def score_session(
         # note (jeffro): the last chunk's own playback is not part of the generation
         # time, so the factor covers the audio that arrived before it.
         streamed_audio_s = sum(audio_s for _, audio_s in chunks[:-1])
-        first_audio_unit = reply_first_audio_unit[response_id]
+        if is_native:
+            first_audio_unit = reply_first_audio_unit[response_id]
+            # note (jeffro): a reply's first text can come one unit before its first audio,
+            # Latency starts at the unit carrying the first audio, so that unit is not counted as serving time.
+            reply_ready_s = ready_s(first_audio_unit)
+            units_before_first_audio = round(
+                (
+                    first_audio_unit.t_start_ms
+                    - reply_opening_unit[response_id].t_start_ms
+                )
+                / unit_ms
+            )
+        else:
+            # note (jeffro): response.created arrives with the server's end of turn,
+            # or at the input end when the server flushes an open turn.
+            reply_ready_s = reply_created_s[response_id]
+            units_before_first_audio = None
         replies.append(
             {
                 "response_id": response_id,
-                # note (jeffro): a reply's first text can come one unit before its first audio,
-                # Latency starts at the unit carrying the first audio, so that unit is not counted as serving time.
-                "first_audio_latency_s": chunks[0][0] - ready_s(first_audio_unit),
-                "units_before_first_audio": round(
-                    (
-                        first_audio_unit.t_start_ms
-                        - reply_opening_unit[response_id].t_start_ms
-                    )
-                    / unit_ms
-                ),
+                "first_audio_latency_s": chunks[0][0] - reply_ready_s,
+                "units_before_first_audio": units_before_first_audio,
                 "audio_s": sum(audio_s for _, audio_s in chunks),
                 "underrun_s": underrun_s,
                 "startup_buffer_needed_s": startup_buffer_needed_s,
@@ -153,14 +176,18 @@ def score_session(
             }
         )
 
-    units_expected = input_units(variant_dir, unit_ms)
+    units_expected = input_units(variant_dir, unit_ms) if is_native else None
     return {
         "unit_ms": unit_ms,
         "units_expected": units_expected,
-        "units_done": len(unit_lags_s),
-        "units_missed": units_expected
-        - len(unit_lags_s)
-        + sum(lag_s > unit_ms / 1000 for lag_s in unit_lags_s),
+        "units_done": len(unit_lags_s) if is_native else None,
+        "units_missed": (
+            units_expected
+            - len(unit_lags_s)
+            + sum(lag_s > unit_ms / 1000 for lag_s in unit_lags_s)
+            if is_native
+            else None
+        ),
         "unit_lag_s": unit_lags_s,
         "replies": replies,
     }
@@ -175,29 +202,28 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
         pass
     profile = manifest["profile"]
     unit_ms = PROFILES[profile].native_unit_ms
+    is_native = PROFILES[profile].protocol == "native"
     attempted = [
         variant_state
         for sample in run["samples"]
         for variant_state in sample["variants"].values()
         if variant_state["status"] in SCORED_STATUSES + FAILED_STATUSES
     ]
-    sessions: list[dict[str, JsonValue]] = []
-    units_expected = 0
-    units_missed = 0
+    sessions = [
+        score_session(run_dir / variant_state["directory"], profile, playback_reserve_s)
+        for variant_state in attempted
+        if variant_state["status"] in SCORED_STATUSES
+    ]
+    # note (jeffro): every unit of a session that broke off is missed, so a failure
+    # cannot lower the miss rate.
+    failed_units = sum(
+        input_units(run_dir / variant_state["directory"], unit_ms)
+        for variant_state in attempted
+        if variant_state["status"] in FAILED_STATUSES
+    )
     trace_spans_s: list[tuple[float, float]] = []
     for variant_state in attempted:
         variant_dir = run_dir / variant_state["directory"]
-        if variant_state["status"] in SCORED_STATUSES:
-            session = score_session(variant_dir, profile, playback_reserve_s)
-            sessions.append(session)
-            units_expected += session["units_expected"]
-            units_missed += session["units_missed"]
-        else:
-            # note (jeffro): every unit of a session that broke off is missed, so a
-            # failure cannot lower the miss rate.
-            session_units = input_units(variant_dir, unit_ms)
-            units_expected += session_units
-            units_missed += session_units
         trace_lines = (variant_dir / "continuous.jsonl").read_text().splitlines()
         if trace_lines:
             trace_spans_s.append(
@@ -213,7 +239,32 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
     sessions_failed = sum(
         variant_state["status"] in FAILED_STATUSES for variant_state in attempted
     )
-    unit_miss_rate = units_missed / units_expected
+    real_time_factor = quantiles(
+        [
+            reply["real_time_factor"]
+            for reply in replies
+            if reply["real_time_factor"] is not None
+        ]
+    )
+    if is_native:
+        units_expected = failed_units + sum(
+            session["units_expected"] for session in sessions
+        )
+        units_missed = failed_units + sum(
+            session["units_missed"] for session in sessions
+        )
+        unit_miss_rate = units_missed / units_expected
+        pacing_target = (
+            f"unit miss rate at most {MAX_UNIT_MISS_RATE:.0%}",
+            unit_miss_rate > MAX_UNIT_MISS_RATE,
+        )
+    else:
+        units_expected = units_missed = unit_miss_rate = None
+        pacing_target = (
+            f"reply real-time factor p90 below {MAX_REPLY_REAL_TIME_FACTOR:g}",
+            real_time_factor["p90"] is None
+            or real_time_factor["p90"] >= MAX_REPLY_REAL_TIME_FACTOR,
+        )
     return {
         "run": str(run_dir),
         "profile": profile,
@@ -236,8 +287,10 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
             [lag_s for session in sessions for lag_s in session["unit_lag_s"]]
         ),
         "replies": len(replies),
-        "replies_with_audio_after_text": sum(
-            reply["units_before_first_audio"] > 0 for reply in replies
+        "replies_with_audio_after_text": (
+            sum(reply["units_before_first_audio"] > 0 for reply in replies)
+            if is_native
+            else None
         ),
         "first_audio_latency_s": quantiles(
             [reply["first_audio_latency_s"] for reply in replies]
@@ -248,23 +301,14 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
         "playback_reserve_s": playback_reserve_s,
         "replies_with_underrun": sum(reply["underrun_s"] > 0 for reply in replies),
         "underrun_s": sum(reply["underrun_s"] for reply in replies),
-        "real_time_factor": quantiles(
-            [
-                reply["real_time_factor"]
-                for reply in replies
-                if reply["real_time_factor"] is not None
-            ]
-        ),
+        "real_time_factor": real_time_factor,
         "unmet_targets": [
             target
             for target, is_unmet in (
                 ("no failed sessions", sessions_failed > 0),
                 ("no admission denials", load["variants_with_admission_denials"] > 0),
                 ("no input pacing violations", load["input_pacing_violations"] > 0),
-                (
-                    f"unit miss rate at most {MAX_UNIT_MISS_RATE:.0%}",
-                    unit_miss_rate > MAX_UNIT_MISS_RATE,
-                ),
+                pacing_target,
             )
             if is_unmet
         ],

@@ -11,6 +11,8 @@ from benchmarks.duplex.serving import score_session, serving_report, summarize_l
 
 # MiniCPM-o: 1000 ms units, 24 kHz output.
 PROFILE = "minicpmo-native-pr2377"
+# Qwen3-Omni behind server VAD: legacy protocol, 24 kHz output.
+TURN_BASED_PROFILE = "qwen3-omni-half-duplex"
 PLAYBACK_RESERVE_S = 0.3
 START_S = 100.0
 INPUT_S = 2.5
@@ -25,8 +27,13 @@ def record_session(
     reply_unit: int = 1,
     reply_audio_unit: int = 1,
     reply_audio_s: list[float] | None = None,
+    reply_created_s: float | None = None,
+    is_legacy: bool = False,
 ) -> Path:
-    """Write a paced 80 ms session whose unit k completes at unit_done_s[k]."""
+    """Write a paced 80 ms session whose unit k completes at unit_done_s[k].
+
+    A legacy reply carries no unit metadata and uses the legacy audio event name.
+    """
     variant_dir.mkdir(parents=True)
     packets = math.ceil(input_s * 1000 / 80)
     (variant_dir / "input.pcm").write_bytes(b"\x00\x00" * round(input_s * 16000))
@@ -80,20 +87,20 @@ def record_session(
         )
     if reply_audio_s is not None:
         add(
-            reply_audio_s[0],
+            reply_audio_s[0] if reply_created_s is None else reply_created_s,
             "receive",
             "response.created",
             response={"id": "response0", "status": "in_progress"},
-            sglang=media(reply_unit),
+            **({} if is_legacy else {"sglang": media(reply_unit)}),
         )
         for arrival_s in reply_audio_s:
             add(
                 arrival_s,
                 "receive",
-                "response.output_audio.delta",
+                "response.audio.delta" if is_legacy else "response.output_audio.delta",
                 response_id="response0",
                 delta=OUTPUT_SECOND,
-                sglang=media(reply_audio_unit),
+                **({} if is_legacy else {"sglang": media(reply_audio_unit)}),
             )
     else:
         pass
@@ -110,17 +117,24 @@ def record_run(
     sessions: list[tuple[str, list[float]]],
     *,
     admission_denials: int = 0,
+    profile: str = PROFILE,
+    reply_audio_s: list[float] | None = None,
 ) -> Path:
     """Write a complete recording whose sessions are (status, unit_done_s) pairs."""
     samples = []
     for index, (status, unit_done_s) in enumerate(sessions):
         directory = f"samples/{index}/input"
-        record_session(run_dir / directory, unit_done_s)
+        record_session(
+            run_dir / directory,
+            unit_done_s,
+            reply_audio_s=reply_audio_s,
+            is_legacy=profile == TURN_BASED_PROFILE,
+        )
         samples.append(
             {"variants": {"input": {"directory": directory, "status": status}}}
         )
     (run_dir / "manifest.json").write_text(
-        json.dumps({"kind": "full-duplex-bench-v1.0", "profile": PROFILE})
+        json.dumps({"kind": "full-duplex-bench-v1.0", "profile": profile})
     )
     (run_dir / "run.json").write_text(
         json.dumps(
@@ -254,3 +268,43 @@ def test_capacity_is_unbounded_when_every_level_meets_the_targets(
 
     assert report["max_concurrency_meeting_targets"] == 1
     assert report["capacity_bounded"] is False
+
+
+def test_turn_based_reply_starts_at_response_created(tmp_path: Path) -> None:
+    # The unit receipt held until the reply ends is not a serving lag.
+    session = score_session(
+        record_session(
+            tmp_path / "session",
+            [104.9],
+            reply_created_s=102.6,
+            reply_audio_s=[102.8, 103.0],
+            is_legacy=True,
+        ),
+        TURN_BASED_PROFILE,
+        PLAYBACK_RESERVE_S,
+    )
+
+    assert session["units_missed"] is None
+    assert session["unit_lag_s"] == []
+    (reply,) = session["replies"]
+    assert reply["first_audio_latency_s"] == pytest.approx(0.2)
+    assert reply["units_before_first_audio"] is None
+    assert reply["real_time_factor"] == pytest.approx(0.2)
+    assert reply["startup_buffer_needed_s"] == 0.0
+
+
+def test_turn_based_level_is_judged_by_reply_real_time_factor(tmp_path: Path) -> None:
+    level = summarize_level(
+        record_run(
+            tmp_path / "run",
+            1,
+            [("pass", [])],
+            profile=TURN_BASED_PROFILE,
+            reply_audio_s=[102.8, 104.0],
+        ),
+        PLAYBACK_RESERVE_S,
+    )
+
+    assert level["unit_miss_rate"] is None
+    assert level["real_time_factor"]["p90"] == pytest.approx(1.2)
+    assert level["unmet_targets"] == ["reply real-time factor p90 below 1"]

@@ -19,12 +19,16 @@ def milliseconds(value_s: JsonValue) -> str:
     return "-" if value_s is None else f"{value_s * 1000:.0f}"
 
 
+def ratio(value: JsonValue, form: str) -> str:
+    return "-" if value is None else format(value, form)
+
+
 def format_table(report: dict[str, JsonValue]) -> str:
     rows = [
         "| N | mean open | sessions failed | 503 | pacing violations | unit miss "
         "| unit lag p50 / p90 / p99 (ms) | first audio p50 / p90 (ms) "
-        "| buffer needed p50 / p90 (ms) | underrun replies | meets targets |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| buffer needed p50 / p90 (ms) | underrun replies | RTF p90 | meets targets |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for level in report["levels"]:
         unit_lag = level["unit_lag_s"]
@@ -34,13 +38,14 @@ def format_table(report: dict[str, JsonValue]) -> str:
             f"| {level['concurrency']} | {level['mean_open_sessions']:.1f} "
             f"| {level['sessions_failed']}/{level['sessions']} "
             f"| {level['admission_denials']} | {level['input_pacing_violations']} "
-            f"| {level['unit_miss_rate']:.1%} "
+            f"| {ratio(level['unit_miss_rate'], '.1%')} "
             f"| {milliseconds(unit_lag['p50'])} / {milliseconds(unit_lag['p90'])} / "
             f"{milliseconds(unit_lag['p99'])} "
             f"| {milliseconds(first_audio['p50'])} / {milliseconds(first_audio['p90'])} "
             f"| {milliseconds(buffer_needed['p50'])} / "
             f"{milliseconds(buffer_needed['p90'])} "
             f"| {level['replies_with_underrun']}/{level['replies']} "
+            f"| {ratio(level['real_time_factor']['p90'], '.2f')} "
             f"| {'yes' if not level['unmet_targets'] else '; '.join(level['unmet_targets'])} |"
         )
     capacity = report["max_concurrency_meeting_targets"]
