@@ -30,6 +30,10 @@ DEFAULT_TRITON_SAMPLING = True
 DEFAULT_TOWER_FUSED_LAYERS = True
 DEFAULT_ENABLE_ASYNC_DECODE = False
 DEFAULT_ASYNC_DECODE_MIN_BATCH_SIZE = 1
+# A lone prefill through the 35B MoE stalls a busy decode batch.
+DEFAULT_PREFILL_COALESCE_MIN_RUNNING_REQUESTS = 32
+DEFAULT_PREFILL_COALESCE_REQUESTS = 4
+DEFAULT_PREFILL_COALESCE_WAIT_MS = 10.0
 # The codec of the public S2-Pro release, pinned to an immutable commit.
 DEFAULT_CODEC_PATH = "fishaudio/s2-pro@1de9996b6be38b745688de084d87a5633f714e4e"
 PREPROCESSING_TOTAL_RESERVE_BYTES = "6GiB"
@@ -71,6 +75,16 @@ class Drama3EngineFactoryArgs(FactoryArgs):
     enable_async_decode: bool = DEFAULT_ENABLE_ASYNC_DECODE
     async_decode_min_batch_size: int = Field(
         default=DEFAULT_ASYNC_DECODE_MIN_BATCH_SIZE, ge=1
+    )
+    prefill_coalesce_requests: int = Field(
+        default=DEFAULT_PREFILL_COALESCE_REQUESTS, ge=0
+    )
+    prefill_coalesce_wait_ms: float = Field(
+        default=DEFAULT_PREFILL_COALESCE_WAIT_MS, gt=0
+    )
+    prefill_coalesce_when_idle: bool = False
+    prefill_coalesce_min_running_requests: int = Field(
+        default=DEFAULT_PREFILL_COALESCE_MIN_RUNNING_REQUESTS, ge=0
     )
 
 

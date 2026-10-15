@@ -17,6 +17,7 @@ from sglang.srt.models.registry import ModelRegistry
 from sglang.srt.server_args import ServerArgs
 from transformers import AutoConfig
 
+from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.model_runner.request_id_prefill_cuda_graph_runner import (
     RequestIdPrefillCudaGraphRunner,
@@ -30,6 +31,9 @@ from sglang_omni.models.fishaudio_drama3.config import (
     DEFAULT_FIRST_FRAME_CUDA_GRAPHS,
     DEFAULT_MAX_NEW_TOKENS_CAP,
     DEFAULT_MAX_PROMPT_ROWS,
+    DEFAULT_PREFILL_COALESCE_MIN_RUNNING_REQUESTS,
+    DEFAULT_PREFILL_COALESCE_REQUESTS,
+    DEFAULT_PREFILL_COALESCE_WAIT_MS,
     DEFAULT_STREAM_FOLLOWUP_STRIDE,
     DEFAULT_STREAM_FOLLOWUP_STRIDE_RAMP,
     DEFAULT_STREAM_STRIDE,
@@ -59,6 +63,7 @@ from sglang_omni.models.fishaudio_drama3.sampling_kernels import (
     CodebookSampler,
     triton_sampling_unsupported_reason,
 )
+from sglang_omni.models.fishaudio_drama3.scheduler import Drama3Scheduler
 from sglang_omni.models.fishaudio_drama3.sglang_model import Drama3ForCausalLM
 from sglang_omni.models.fishaudio_drama3.tower_kernels import (
     FUSED_KERNELS,
@@ -70,6 +75,7 @@ from sglang_omni.scheduling.engine_factory import (
     SchedulerExtras,
     SGLangGenerationEngineBuilder,
 )
+from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 from sglang_omni.utils.checkpoint import resolve_checkpoint
 
@@ -111,6 +117,12 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
         tower_fused_layers: bool = DEFAULT_TOWER_FUSED_LAYERS,
         enable_async_decode: bool = DEFAULT_ENABLE_ASYNC_DECODE,
         async_decode_min_batch_size: int = DEFAULT_ASYNC_DECODE_MIN_BATCH_SIZE,
+        prefill_coalesce_requests: int = DEFAULT_PREFILL_COALESCE_REQUESTS,
+        prefill_coalesce_wait_ms: float = DEFAULT_PREFILL_COALESCE_WAIT_MS,
+        prefill_coalesce_when_idle: bool = False,
+        prefill_coalesce_min_running_requests: int = (
+            DEFAULT_PREFILL_COALESCE_MIN_RUNNING_REQUESTS
+        ),
     ) -> None:
         self.context_length = context_length
         self.max_running_requests = max_running_requests
@@ -125,6 +137,12 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
         self.tower_fused_layers = tower_fused_layers
         self.enable_async_decode = enable_async_decode
         self.async_decode_min_batch_size = async_decode_min_batch_size
+        self.prefill_coalesce_requests = prefill_coalesce_requests
+        self.prefill_coalesce_wait_ms = prefill_coalesce_wait_ms
+        self.prefill_coalesce_when_idle = prefill_coalesce_when_idle
+        self.prefill_coalesce_min_running_requests = (
+            prefill_coalesce_min_running_requests
+        )
         self.frame_streamer: Drama3FrameStreamer | None = None
         self.sglang_runner: SGLModelRunner | None = None
 
@@ -392,9 +410,36 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
                 "Drama 3 async decode: off, "
                 "tts_engine.factory.enable_async_decode is false"
             )
+        if self.prefill_coalesce_requests <= 1:
+            logger.info("Drama 3 prefill coalesce: off")
+        else:
+            logger.info(
+                f"Drama 3 prefill coalesce: once "
+                f"{self.prefill_coalesce_min_running_requests} requests are running, "
+                f"hold for {self.prefill_coalesce_requests} or "
+                f"{self.prefill_coalesce_wait_ms:g} ms"
+            )
         return {
             "stream_output_builder": self.frame_streamer,
             "enable_async_decode": self.enable_async_decode,
             "async_decode_min_batch_size": self.async_decode_min_batch_size,
             "async_decode_resolve_before_prefill": True,
+            "prefill_coalesce_requests": self.prefill_coalesce_requests,
+            "prefill_coalesce_wait_ms": self.prefill_coalesce_wait_ms,
+            "prefill_coalesce_when_idle": self.prefill_coalesce_when_idle,
         }
+
+    def post_scheduler_setup(
+        self,
+        scheduler: OmniScheduler[Drama3RequestData],
+        model_runner: ModelRunner[Drama3RequestData],
+    ) -> None:
+        # OmniScheduler has no running-count field; the gate lives on this subclass.
+        scheduler.__class__ = Drama3Scheduler
+        if isinstance(scheduler, Drama3Scheduler):
+            scheduler.prefill_coalesce_min_running_requests = (
+                self.prefill_coalesce_min_running_requests
+            )
+        else:
+            raise RuntimeError("Drama 3 prefill coalesce gate was not installed")
+        super().post_scheduler_setup(scheduler, model_runner)

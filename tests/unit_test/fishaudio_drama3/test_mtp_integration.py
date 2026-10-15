@@ -39,7 +39,12 @@ from sglang_omni.model_runner.sglang_execution import SGLangExecutionBridge
 from sglang_omni.model_runner.sglang_model_runner import SGLModelRunner
 from sglang_omni.models.fishaudio_drama3 import engine_builder, sglang_model
 from sglang_omni.models.fishaudio_drama3.audio_decoder import AudioDecoder
-from sglang_omni.models.fishaudio_drama3.config import Drama3VocoderFactoryArgs
+from sglang_omni.models.fishaudio_drama3.config import (
+    DEFAULT_PREFILL_COALESCE_MIN_RUNNING_REQUESTS,
+    DEFAULT_PREFILL_COALESCE_REQUESTS,
+    DEFAULT_PREFILL_COALESCE_WAIT_MS,
+    Drama3VocoderFactoryArgs,
+)
 from sglang_omni.models.fishaudio_drama3.engine_builder import (
     DECODE_STEPS_BETWEEN_PREFILLS,
     PREFILL_CUDA_GRAPH_MAX_TOKENS,
@@ -70,6 +75,7 @@ from sglang_omni.models.fishaudio_drama3.sampling import (
     RAS_WINDOW_FRAMES,
 )
 from sglang_omni.models.fishaudio_drama3.sampling_kernels import PHILOX_SEED_MODULUS
+from sglang_omni.models.fishaudio_drama3.scheduler import Drama3Scheduler
 from sglang_omni.models.fishaudio_drama3.sglang_model import (
     Drama3DecodeBuffers,
     Drama3ForCausalLM,
@@ -89,6 +95,7 @@ from sglang_omni.scheduling.generation_batch_policy import (
     build_generation_batch_overrides,
 )
 from sglang_omni.scheduling.message import OutgoingMessage
+from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 from sglang_omni.scheduling.types import (
     ModelRunnerOutput,
@@ -489,6 +496,115 @@ def test_engine_builder_hands_the_async_decode_switches_to_the_scheduler(
         scheduler_kwargs["async_decode_min_batch_size"],
         scheduler_kwargs["async_decode_resolve_before_prefill"],
     ) == (enable_async_decode, 3, True)
+
+
+def test_engine_builder_coalesces_prefills_only_under_load(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    builder = Drama3EngineBuilder(context_length=CONTEXT_LENGTH, max_running_requests=1)
+    builder.make_adapters(ConfigOnlyModel(FishOmniConfig(**fish_config_dict())))
+
+    with caplog.at_level(logging.INFO, logger=engine_builder.logger.name):
+        scheduler_kwargs = builder.extra_scheduler_kwargs()
+
+    assert (
+        scheduler_kwargs["prefill_coalesce_requests"],
+        scheduler_kwargs["prefill_coalesce_wait_ms"],
+        scheduler_kwargs["prefill_coalesce_when_idle"],
+        builder.prefill_coalesce_min_running_requests,
+    ) == (
+        DEFAULT_PREFILL_COALESCE_REQUESTS,
+        DEFAULT_PREFILL_COALESCE_WAIT_MS,
+        False,
+        DEFAULT_PREFILL_COALESCE_MIN_RUNNING_REQUESTS,
+    )
+    assert (
+        "Drama 3 prefill coalesce: once "
+        f"{DEFAULT_PREFILL_COALESCE_MIN_RUNNING_REQUESTS} requests are running"
+    ) in caplog.text
+
+    disabled = Drama3EngineBuilder(
+        context_length=CONTEXT_LENGTH,
+        max_running_requests=1,
+        prefill_coalesce_requests=0,
+    )
+    disabled.make_adapters(ConfigOnlyModel(FishOmniConfig(**fish_config_dict())))
+    assert disabled.extra_scheduler_kwargs()["prefill_coalesce_requests"] == 0
+
+    installed = OmniScheduler.__new__(OmniScheduler)
+    builder.post_scheduler_setup(installed, object())
+    assert isinstance(installed, Drama3Scheduler)
+    assert (
+        installed.prefill_coalesce_min_running_requests
+        == DEFAULT_PREFILL_COALESCE_MIN_RUNNING_REQUESTS
+    )
+
+
+class RunningBatch:
+    def __init__(self, request_count: int) -> None:
+        self.reqs = [object() for _ in range(request_count)]
+
+    def is_empty(self) -> bool:
+        return not self.reqs
+
+
+def coalesce_scheduler(
+    *,
+    running_min: int,
+    coalesce_requests: int,
+    waiting_request_count: int,
+) -> Drama3Scheduler:
+    scheduler = Drama3Scheduler.__new__(Drama3Scheduler)
+    scheduler.prefill_coalesce_min_running_requests = running_min
+    scheduler.prefill_coalesce_requests = coalesce_requests
+    scheduler.prefill_coalesce_when_idle = False
+    scheduler.prefill_coalesce_requires_pending_builds = False
+    scheduler.chunked_req = None
+    scheduler.waiting_queue = [object() for _ in range(waiting_request_count)]
+    return scheduler
+
+
+@pytest.mark.parametrize(
+    ("running_request_count", "waiting_request_count", "coalesce_requests", "held"),
+    [
+        (0, 1, 4, False),
+        (31, 1, 4, False),
+        (32, 1, 4, True),
+        (64, 3, 4, True),
+        (32, 4, 4, False),
+        (40, 1, 0, False),
+    ],
+    ids=[
+        "idle",
+        "below-load",
+        "one-arrival",
+        "partial-batch",
+        "batch-full",
+        "disabled",
+    ],
+)
+def test_prefill_coalesce_holds_only_while_decode_is_busy(
+    running_request_count: int,
+    waiting_request_count: int,
+    coalesce_requests: int,
+    held: bool,
+) -> None:
+    scheduler = coalesce_scheduler(
+        running_min=DEFAULT_PREFILL_COALESCE_MIN_RUNNING_REQUESTS,
+        coalesce_requests=coalesce_requests,
+        waiting_request_count=waiting_request_count,
+    )
+    if running_request_count == 0:
+        running_batch = None
+    else:
+        running_batch = RunningBatch(running_request_count)
+
+    waiting = scheduler.prefill_coalesce_waiting_requests(running_batch)
+
+    if held:
+        assert waiting is scheduler.waiting_queue
+    else:
+        assert waiting is None
 
 
 def test_engine_builder_resolves_a_hub_id_to_a_local_snapshot(
