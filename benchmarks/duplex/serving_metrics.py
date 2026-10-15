@@ -77,11 +77,13 @@ def render_serving(run_name: str, rows: list[dict[str, JsonValue]]) -> str:
         f"{nominal_unit_ms} ms Unit. Latencies under load do not compare with "
         "behavior runs at concurrency 1.",
         "",
-        "| Concurrency | Passed | Pacing violations | Variants with denials "
-        "| Initial delay p50 / p90 / max (s) | Units / finished "
-        "| Ready to first output p50 / p95 / max (ms) "
-        "| Ready to finished p50 / p95 / max (ms) | Thinker service p95 (ms) "
-        "| Deadline misses |",
+        (
+            "| Concurrency | Passed | Pacing violations | Variants with denials "
+            "| Initial delay p50 / p90 / max (s) | Units / finished "
+            "| Ready to first output p50 / p95 / max (ms) "
+            "| Ready to finished p50 / p95 / max (ms) | Thinker service p95 (ms) "
+            "| Deadline misses |"
+        ),
         "|" + "---:|" * 10,
     ]
     for row in rows:
