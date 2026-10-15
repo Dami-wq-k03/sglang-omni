@@ -3,10 +3,13 @@
 
 Run from the repository root with the sglang-omni venv active:
     python -m benchmarks.duplex.fdb setup
-    python -m benchmarks.duplex.fdb run --run-name smoke --v15-per-subset 1 --v10-per-subset 3
+    python -m benchmarks.duplex.fdb generate --run-name smoke --v15-per-subset 1 --v10-per-subset 3
+    python -m benchmarks.duplex.fdb asr --run-name smoke
+    python -m benchmarks.duplex.fdb judge --run-name smoke
+    python -m benchmarks.duplex.fdb aggregate --run-name smoke
 
-`run` is generate, asr, judge and aggregate in order. Each of them is also its
-own subcommand, which continues a run that stopped at that step.
+`generate --all-stages` runs asr, judge and aggregate after it, so the four
+lines above become one.
 
 Each dataset has its own selection options; a count of 0 leaves it out.
 """
@@ -89,17 +92,6 @@ def add_selection_arguments(parser: argparse.ArgumentParser) -> None:
         )
 
 
-def add_generate_arguments(parser: argparse.ArgumentParser) -> None:
-    add_selection_arguments(parser)
-    parser.add_argument(
-        "--num-shards",
-        type=int,
-        default=1,
-        help="Parallel sessions against the one server; refused above the model "
-        "server's max_sessions (default: %(default)s)",
-    )
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -133,19 +125,24 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[log_options],
         help="Download and pin every input; safe to rerun",
     )
-    add_generate_arguments(
-        commands.add_parser(
-            "run",
-            parents=[repeat_options],
-            help="Steps 1 to 3, then aggregate; stops at the first failing step",
-        )
+    generate_parser = commands.add_parser(
+        "generate",
+        parents=[repeat_options],
+        help="Step 1: record sessions, export scoring audio",
     )
-    add_generate_arguments(
-        commands.add_parser(
-            "generate",
-            parents=[repeat_options],
-            help="Step 1: record sessions, export scoring audio",
-        )
+    add_selection_arguments(generate_parser)
+    generate_parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Parallel sessions against the one server; refused above the model "
+        "server's max_sessions (default: %(default)s)",
+    )
+    generate_parser.add_argument(
+        "--all-stages",
+        action="store_true",
+        help="After recording, run asr, judge and aggregate; stops at the first "
+        "failing step",
     )
     for name, help_text in (
         ("asr", "Step 2: Parakeet ASR, v1.5 timing, v1.0 unified scoring"),
@@ -210,19 +207,24 @@ def sample_selection(
     return v15_selection, v10_selection
 
 
-def run_steps(
+def generate_stages(
     settings: Settings,
     repeat: int,
     selection: SampleSelection,
     v10_selection: SampleSelection,
     num_shards: int,
+    all_stages: bool,
 ) -> None:
-    """Steps 1 to 3 on a new repeat, then aggregate. A failing step stops the run
-    with its own message, which names the command that continues it."""
+    """Step 1, and with all_stages steps 2 and 3 and aggregate after it. A failing
+    step stops the chain with its own message, which names the command that
+    continues it."""
     generate(settings, repeat, selection, v10_selection, num_shards)
-    asr(settings, repeat, retry_failed=False)
-    judge(settings, repeat, retry_failed=False)
-    aggregate(settings)
+    if all_stages:
+        asr(settings, repeat, retry_failed=False)
+        judge(settings, repeat, retry_failed=False)
+        aggregate(settings)
+    else:
+        pass
 
 
 def exit_on_sigterm(signal_number: int, frame: FrameType | None) -> None:
@@ -248,13 +250,13 @@ def main() -> None:
         pass
     if args.command == "setup":
         setup(settings)
-    elif args.command == "run":
-        run_steps(
-            settings, args.repeat, *sample_selection(parser, args), args.num_shards
-        )
     elif args.command == "generate":
-        generate(
-            settings, args.repeat, *sample_selection(parser, args), args.num_shards
+        generate_stages(
+            settings,
+            args.repeat,
+            *sample_selection(parser, args),
+            args.num_shards,
+            args.all_stages,
         )
     elif args.command == "asr":
         asr(settings, args.repeat, args.retry_failed)

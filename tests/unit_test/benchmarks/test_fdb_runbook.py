@@ -199,16 +199,15 @@ def test_each_dataset_has_its_own_selection_options(tmp_path: Path) -> None:
             parse_selection(*arguments)
 
 
-def test_run_chains_the_steps_with_the_generate_options_and_stops_at_a_failure(
+def test_generate_all_stages_chains_the_steps_and_stops_at_a_failure(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    options = ["--repeat", "2", "--num-shards", "3", "--v15-per-subset", "0"]
     parser = build_parser()
-    args = parser.parse_args(["run", *options])
-    selections = sample_selection(parser, args)
-    assert selections == sample_selection(
-        parser, parser.parse_args(["generate", *options])
+    assert not parser.parse_args(["generate"]).all_stages
+    args = parser.parse_args(
+        ["generate", "--repeat", "2", "--num-shards", "3", "--all-stages"]
     )
+    selections = sample_selection(parser, args)
     calls = []
 
     def step(name: str, error: str | None = None):
@@ -221,19 +220,26 @@ def test_run_chains_the_steps_with_the_generate_options_and_stops_at_a_failure(
 
         return record
 
+    def chain(all_stages: bool) -> list[str]:
+        calls.clear()
+        runbook_cli.generate_stages(
+            settings, args.repeat, *selections, args.num_shards, all_stages
+        )
+        return [name for name, _, _ in calls]
+
     for name in ("generate", "asr", "judge", "aggregate"):
         monkeypatch.setattr(runbook_cli, name, step(name))
-    runbook_cli.run_steps(settings, args.repeat, *selections, args.num_shards)
+    assert chain(False) == ["generate"]
+    assert chain(args.all_stages) == ["generate", "asr", "judge", "aggregate"]
     assert calls == [
         ("generate", (settings, 2, *selections, 3), {}),
         ("asr", (settings, 2), {"retry_failed": False}),
         ("judge", (settings, 2), {"retry_failed": False}),
         ("aggregate", (settings,), {}),
     ]
-    calls.clear()
     monkeypatch.setattr(runbook_cli, "asr", step("asr", "WARNING: rerun asr"))
     with pytest.raises(SystemExit, match="rerun asr"):
-        runbook_cli.run_steps(settings, args.repeat, *selections, args.num_shards)
+        chain(True)
     assert [name for name, _, _ in calls] == ["generate", "asr"]
 
 
