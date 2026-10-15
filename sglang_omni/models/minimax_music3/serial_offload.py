@@ -10,7 +10,14 @@ from importlib.metadata import version
 from typing import Literal, Protocol
 
 import torch
-from torch_memory_saver import torch_memory_saver
+
+try:
+    from torch_memory_saver import torch_memory_saver
+except ModuleNotFoundError as failure:
+    if failure.name != "torch_memory_saver":
+        raise
+    else:
+        torch_memory_saver = None
 
 from sglang_omni.models.minimax_music3.weight_cache import RuntimeWeights, StagingRing
 
@@ -70,6 +77,12 @@ class StageResidency:
             )
         else:
             pass
+        if self.device.type == "cuda" and torch_memory_saver is None:
+            raise RuntimeError(
+                "Music3 CUDA offload requires torch_memory_saver==0.0.10"
+            )
+        else:
+            pass
         self.weights = RuntimeWeights(
             self.modules,
             source=source,
@@ -100,6 +113,7 @@ class StageResidency:
         else:
             pass
         for tag in self.tags:
+            assert torch_memory_saver is not None
             torch_memory_saver.pause(tag=tag)
         self.is_resident = False
         logger.info(
@@ -116,6 +130,7 @@ class StageResidency:
             pass
         started_at_seconds = time.perf_counter()
         for tag in self.tags:
+            assert torch_memory_saver is not None
             torch_memory_saver.resume(tag=tag)
         self.weights.restore(self.staging_ring)
         if self.device.type == "cuda":
@@ -138,6 +153,7 @@ class SerialOffloadCoordinator:
         self.is_enabled: bool = False
         self.ar_residency: StageResidency | None = None
         self.owner_request_id: str | None = None
+        self.has_acoustic_retired: bool = False
         self.phase: Literal["idle", "ar", "acoustic", "failed"] = "idle"
         self.failure: Exception | None = None
         self.paused_at_seconds: float | None = None
@@ -238,6 +254,7 @@ class SerialOffloadCoordinator:
                 return True
             elif self.phase == "idle":
                 self.owner_request_id = request_id
+                self.has_acoustic_retired = False
                 self.phase = "ar"
                 return True
             else:
@@ -258,6 +275,8 @@ class SerialOffloadCoordinator:
                     f"residency (owner={self.owner_request_id!r})"
                 )
             elif self.phase == "acoustic":
+                return
+            elif self.has_acoustic_retired:
                 return
             else:
                 pass
@@ -309,7 +328,13 @@ class SerialOffloadCoordinator:
             pass
         with self.lock:
             self.require_ar_locked()
-            if self.owner_request_id != request_id or self.phase != "acoustic":
+            if self.owner_request_id != request_id:
+                return
+            elif self.phase == "ar":
+                # note (AkazaAkane): Acoustic abort can precede the terminal AR handoff.
+                self.has_acoustic_retired = True
+                return
+            elif self.phase != "acoustic":
                 return
             else:
                 pass
@@ -324,6 +349,7 @@ class SerialOffloadCoordinator:
                 self.phase = "failed"
                 raise
             self.owner_request_id = None
+            self.has_acoustic_retired = False
             self.phase = "idle"
             self.paused_at_seconds = None
             self.has_reported_stall = False
@@ -341,6 +367,7 @@ class SerialOffloadCoordinator:
         with self.lock:
             if self.owner_request_id == request_id and self.phase == "ar":
                 self.owner_request_id = None
+                self.has_acoustic_retired = False
                 self.phase = "idle"
             else:
                 pass

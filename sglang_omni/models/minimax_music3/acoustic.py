@@ -14,11 +14,11 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor
-from torch_memory_saver import torch_memory_saver
 
 from sglang_omni.models.minimax_music3.serial_offload import (
     StageResidency,
     get_coordinator,
+    torch_memory_saver,
 )
 from sglang_omni.models.minimax_music3.weight_cache import checkpoint_identity
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
@@ -218,6 +218,12 @@ class MiniMaxMusic3AcousticDecoder:
         load_started = time.perf_counter()
         coordinator = get_coordinator()
         if self.serial_offload_enabled:
+            if torch_memory_saver is None:
+                raise RuntimeError(
+                    "Music3 CUDA offload requires torch_memory_saver==0.0.10"
+                )
+            else:
+                pass
             if self.device.type != "cuda":
                 raise ValueError("Music3 serial offload requires CUDA")
             else:

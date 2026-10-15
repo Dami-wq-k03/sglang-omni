@@ -6,8 +6,11 @@ from __future__ import annotations
 import json
 import mmap
 import shutil
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 
 import pytest
@@ -21,6 +24,10 @@ from sglang_omni.models.minimax_music3.acoustic import (
     MiniMaxMusic3AcousticScheduler,
 )
 from sglang_omni.models.minimax_music3.engine_builder import MiniMaxMusic3EngineBuilder
+from sglang_omni.models.minimax_music3.model_runner import (
+    MiniMaxMusic3ARState,
+    MiniMaxMusic3ModelRunner,
+)
 from sglang_omni.models.minimax_music3.scheduler import MiniMaxMusic3Scheduler
 from sglang_omni.models.minimax_music3.serial_offload import (
     STALL_REPORT_SECONDS,
@@ -319,6 +326,65 @@ class RecordingAcousticDecoder:
 
     def offload_to_cpu(self) -> None:
         self.release_count += 1
+
+
+def test_acoustic_abort_before_terminal_handoff_reopens_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = registered_coordinator()
+    monkeypatch.setattr(
+        "sglang_omni.models.minimax_music3.acoustic.get_coordinator",
+        lambda: coordinator,
+    )
+    decoder = RecordingAcousticDecoder()
+    scheduler = MiniMaxMusic3AcousticScheduler(decoder)
+    runner = MiniMaxMusic3ModelRunner.__new__(MiniMaxMusic3ModelRunner)
+    runner.serial_offload = coordinator
+    runner.request_data = {}
+    ar_state = MiniMaxMusic3ARState(
+        sampling_seed=1,
+        seed=1,
+        decode_limit=1,
+        generated_frames=1,
+        emitted_windows=1,
+    )
+    request_data = SimpleNamespace(
+        ar_state=ar_state, minimax_state=SimpleNamespace(), prompt_tokens=1
+    )
+    monkeypatch.setattr(
+        runner, "dump_reference_ranks", lambda state: scheduler.abort("cancelled")
+    )
+    assert coordinator.try_acquire_ar("cancelled")
+    runner.on_request_finished("cancelled", request_data)
+    assert not coordinator.try_acquire_ar("next")
+    runner.reset_request("cancelled")
+    assert scheduler.is_aborted("cancelled")
+    assert decoder.release_count == 0
+    assert coordinator.try_acquire_ar("next")
+    coordinator.begin_dit_handoff("next")
+    coordinator.require_acoustic("next")
+    scheduler.clear_stream_state("next")
+    assert decoder.release_count == 1
+    assert coordinator.try_acquire_ar("final")
+
+
+def test_resident_music3_imports_without_memory_saver() -> None:
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['torch_memory_saver'] = None; "
+            "from sglang_omni.models.minimax_music3.acoustic import "
+            "MiniMaxMusic3AcousticDecoder; "
+            "from sglang_omni.models.minimax_music3.engine_builder import "
+            "MiniMaxMusic3EngineBuilder; "
+            "assert not MiniMaxMusic3EngineBuilder().enable_serial_offload",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert process.returncode == 0, process.stderr
 
 
 def test_late_acoustic_cleanup_cannot_release_a_new_owner(

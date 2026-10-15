@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 from torch import Tensor
-from torch_memory_saver import torch_memory_saver
 from typing_extensions import Unpack
 
 from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.model_runner.model_worker import ModelWorker
-from sglang_omni.models.minimax_music3.serial_offload import get_coordinator
+from sglang_omni.models.minimax_music3.serial_offload import (
+    get_coordinator,
+    torch_memory_saver,
+)
 from sglang_omni.models.minimax_music3.weight_cache import checkpoint_identity
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.engine_factory import (
@@ -183,6 +185,12 @@ class MiniMaxMusic3EngineBuilder(TtsEngineBuilder["MiniMaxMusic3SGLangRequestDat
         assert self.checkpoint_root is not None
         model = model_worker.model_runner.model
         if self.enable_serial_offload:
+            if torch_memory_saver is None:
+                raise RuntimeError(
+                    "Music3 CUDA offload requires torch_memory_saver==0.0.10"
+                )
+            else:
+                pass
             with torch_memory_saver.region(tag="music3_audio", enable_cpu_backup=False):
                 attach_minimax_modules(model, self.checkpoint_root)
         else:
