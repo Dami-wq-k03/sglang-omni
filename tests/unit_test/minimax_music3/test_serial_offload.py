@@ -17,7 +17,7 @@ import pytest
 import torch
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
 from sglang.srt.sampling.sampling_params import SamplingParams
-from torch_memory_saver import torch_memory_saver
+from torch_memory_saver import configure_subprocess, torch_memory_saver
 
 from sglang_omni.models.minimax_music3.acoustic import (
     MiniMaxMusic3AcousticDecoder,
@@ -263,6 +263,29 @@ def test_residency_keeps_tied_weights_tied_across_a_round_trip() -> None:
 def test_cuda_cycles_release_physical_memory_and_replay_graph_without_recapture(
     tmp_path: Path, source: Literal["ram", "mmap"]
 ) -> None:
+    run_memory_saver_subprocess("run_cuda_offload_cycles", str(tmp_path), source)
+
+
+def run_memory_saver_subprocess(function_name: str, *arguments: str) -> None:
+    with configure_subprocess():
+        process = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import runpy, sys; "
+                "runpy.run_path(sys.argv[1])[sys.argv[2]](*sys.argv[3:])",
+                str(Path(__file__).resolve()),
+                function_name,
+                *arguments,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    assert process.returncode == 0, process.stdout + process.stderr
+
+
+def run_cuda_offload_cycles(cache_dir: str, source: Literal["ram", "mmap"]) -> None:
     device = torch.device("cuda:0")
     tag = f"test_music3_{source}"
     with torch_memory_saver.region(tag=tag, enable_cpu_backup=False):
@@ -276,7 +299,7 @@ def test_cuda_cycles_release_physical_memory_and_replay_graph_without_recapture(
         device,
         tags=(tag,),
         source=source,
-        cache_dir=str(tmp_path),
+        cache_dir=cache_dir,
         staging_ring=staging_ring,
     )
     inputs = torch.ones((2, 4096), device=device)
@@ -456,6 +479,10 @@ def test_acoustic_compute_requires_a_completed_handoff() -> None:
 @pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_sleep_waits_for_compute_on_another_cuda_stream() -> None:
+    run_memory_saver_subprocess("run_sleep_with_concurrent_compute")
+
+
+def run_sleep_with_concurrent_compute() -> None:
     device = torch.device("cuda:0")
     with torch_memory_saver.region(tag="test_music3_stream", enable_cpu_backup=False):
         model = torch.nn.Linear(256, 256, bias=False).to(device)
