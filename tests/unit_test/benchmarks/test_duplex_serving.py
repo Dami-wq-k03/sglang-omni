@@ -7,7 +7,7 @@ import pytest
 from pydantic import JsonValue
 
 from benchmarks.duplex.client import SEND_RECEIPTS_FILE
-from benchmarks.duplex.serving import score_session
+from benchmarks.duplex.serving import score_session, serving_report, summarize_level
 
 # MiniCPM-o: 1000 ms units, 24 kHz output.
 PROFILE = "minicpmo-native-pr2377"
@@ -27,7 +27,7 @@ def record_session(
     reply_audio_s: list[float] | None = None,
 ) -> Path:
     """Write a paced 80 ms session whose unit k completes at unit_done_s[k]."""
-    variant_dir.mkdir()
+    variant_dir.mkdir(parents=True)
     packets = math.ceil(input_s * 1000 / 80)
     (variant_dir / "input.pcm").write_bytes(b"\x00\x00" * round(input_s * 16000))
     (variant_dir / SEND_RECEIPTS_FILE).write_text(
@@ -104,6 +104,43 @@ def record_session(
     return variant_dir
 
 
+def record_run(
+    run_dir: Path,
+    concurrency: int,
+    sessions: list[tuple[str, list[float]]],
+    *,
+    admission_denials: int = 0,
+) -> Path:
+    """Write a complete recording whose sessions are (status, unit_done_s) pairs."""
+    samples = []
+    for index, (status, unit_done_s) in enumerate(sessions):
+        directory = f"samples/{index}/input"
+        record_session(run_dir / directory, unit_done_s)
+        samples.append(
+            {"variants": {"input": {"directory": directory, "status": status}}}
+        )
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"kind": "full-duplex-bench-v1.0", "profile": PROFILE})
+    )
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "load": {
+                    "concurrency": concurrency,
+                    "input_pacing_violations": 0,
+                    "variants_with_admission_denials": admission_denials,
+                },
+                "samples": samples,
+            }
+        )
+    )
+    return run_dir
+
+
+ON_TIME = [101.16, 102.12, 102.7]
+
+
 def test_unit_lag_counts_a_late_unit_and_waits_for_input_end(tmp_path: Path) -> None:
     # Unit 0 completes with packet 12 (100.96), unit 1 with packet 24 (101.92); the
     # padded 500 ms unit 2 waits for the input end at 102.5, not packet 31 (102.48).
@@ -171,3 +208,49 @@ def test_reply_latency_starts_at_the_unit_with_the_first_audio(tmp_path: Path) -
     assert reply["first_audio_latency_s"] == pytest.approx(0.2)
     assert reply["units_before_first_audio"] == 1
     assert reply["real_time_factor"] is None
+
+
+def test_level_counts_every_unit_of_a_failed_session_as_missed(tmp_path: Path) -> None:
+    level = summarize_level(
+        record_run(tmp_path / "run", 2, [("pass", ON_TIME), ("fail", [101.16])]),
+        PLAYBACK_RESERVE_S,
+    )
+
+    assert level["sessions_failed"] == 1
+    assert level["units_expected"] == 6
+    assert level["units_missed"] == 3
+    assert level["unit_lag_s"]["count"] == 3
+    # Spans 101.16-102.7 and 101.16-102.5 over 1.54 s.
+    assert level["mean_open_sessions"] == pytest.approx(2.88 / 1.54)
+    assert level["unmet_targets"] == [
+        "no failed sessions",
+        "unit miss rate at most 1%",
+    ]
+
+
+def test_capacity_is_the_level_below_the_first_unmet_target(tmp_path: Path) -> None:
+    passing = [("pass", ON_TIME)]
+    report = serving_report(
+        [
+            record_run(tmp_path / "c4", 4, passing, admission_denials=1),
+            record_run(tmp_path / "c1", 1, passing),
+            record_run(tmp_path / "c2", 2, passing),
+        ],
+        PLAYBACK_RESERVE_S,
+    )
+
+    assert [level["concurrency"] for level in report["levels"]] == [1, 2, 4]
+    assert report["levels"][2]["unmet_targets"] == ["no admission denials"]
+    assert report["max_concurrency_meeting_targets"] == 2
+    assert report["capacity_bounded"] is True
+
+
+def test_capacity_is_unbounded_when_every_level_meets_the_targets(
+    tmp_path: Path,
+) -> None:
+    report = serving_report(
+        [record_run(tmp_path / "c1", 1, [("pass", ON_TIME)])], PLAYBACK_RESERVE_S
+    )
+
+    assert report["max_concurrency_meeting_targets"] == 1
+    assert report["capacity_bounded"] is False

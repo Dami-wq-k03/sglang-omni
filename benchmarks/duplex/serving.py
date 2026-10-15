@@ -4,17 +4,42 @@
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import math
 from pathlib import Path
 
+import numpy as np
 from pydantic import JsonValue
 
 from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE, SEND_RECEIPTS_FILE
 from benchmarks.duplex.oracle_models import MediaTime, TraceRecord, WireEvent
 from benchmarks.duplex.profiles import PROFILES, ProfileName
+from benchmarks.duplex.run_artifacts import load_run
 
 INPUT_BYTES_PER_MS = SAMPLE_RATE * 2 / 1000
+# note (jeffro): a not_exercised session kept the protocol; its model output just
+# never overlapped the input, so its timing is complete and it is scored.
+SCORED_STATUSES = ("pass", "not_exercised")
+FAILED_STATUSES = ("fail", "error")
+MAX_UNIT_MISS_RATE = 0.01
+
+
+def input_units(variant_dir: Path, unit_ms: int) -> int:
+    """Units the session's input fills, counting the padded last one."""
+    input_ms = (variant_dir / "input.pcm").stat().st_size / INPUT_BYTES_PER_MS
+    return math.ceil(input_ms / unit_ms)
+
+
+def quantiles(values: list[float]) -> dict[str, JsonValue]:
+    return {
+        "count": len(values),
+        **{
+            f"p{percent}": float(np.percentile(values, percent)) if values else None
+            for percent in (50, 90, 99)
+        },
+        "max": max(values, default=None),
+    }
 
 
 def score_session(
@@ -29,7 +54,6 @@ def score_session(
             "appends"
         ]
     }
-    input_ms = (variant_dir / "input.pcm").stat().st_size / INPUT_BYTES_PER_MS
     records = [
         TraceRecord.model_validate(json.loads(line))
         for line in (variant_dir / "continuous.jsonl").read_text().splitlines()
@@ -129,7 +153,7 @@ def score_session(
             }
         )
 
-    units_expected = math.ceil(input_ms / unit_ms)
+    units_expected = input_units(variant_dir, unit_ms)
     return {
         "unit_ms": unit_ms,
         "units_expected": units_expected,
@@ -139,4 +163,138 @@ def score_session(
         + sum(lag_s > unit_ms / 1000 for lag_s in unit_lags_s),
         "unit_lag_s": unit_lags_s,
         "replies": replies,
+    }
+
+
+def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonValue]:
+    """Pool every attempted session of one recording, made at one concurrency."""
+    manifest, run, _ = load_run(run_dir)
+    if run["status"] != "complete":
+        raise ValueError(f"{run_dir} is not a complete recording")
+    else:
+        pass
+    profile = manifest["profile"]
+    unit_ms = PROFILES[profile].native_unit_ms
+    attempted = [
+        variant_state
+        for sample in run["samples"]
+        for variant_state in sample["variants"].values()
+        if variant_state["status"] in SCORED_STATUSES + FAILED_STATUSES
+    ]
+    sessions: list[dict[str, JsonValue]] = []
+    units_expected = 0
+    units_missed = 0
+    trace_spans_s: list[tuple[float, float]] = []
+    for variant_state in attempted:
+        variant_dir = run_dir / variant_state["directory"]
+        if variant_state["status"] in SCORED_STATUSES:
+            session = score_session(variant_dir, profile, playback_reserve_s)
+            sessions.append(session)
+            units_expected += session["units_expected"]
+            units_missed += session["units_missed"]
+        else:
+            # note (jeffro): every unit of a session that broke off is missed, so a
+            # failure cannot lower the miss rate.
+            session_units = input_units(variant_dir, unit_ms)
+            units_expected += session_units
+            units_missed += session_units
+        trace_lines = (variant_dir / "continuous.jsonl").read_text().splitlines()
+        if trace_lines:
+            trace_spans_s.append(
+                (
+                    json.loads(trace_lines[0])["time_s"],
+                    json.loads(trace_lines[-1])["time_s"],
+                )
+            )
+        else:
+            pass
+    replies = [reply for session in sessions for reply in session["replies"]]
+    load = run["load"]
+    sessions_failed = sum(
+        variant_state["status"] in FAILED_STATUSES for variant_state in attempted
+    )
+    unit_miss_rate = units_missed / units_expected
+    return {
+        "run": str(run_dir),
+        "profile": profile,
+        "concurrency": load["concurrency"],
+        # note (jeffro): sessions start as slots free up, so the first and last ones
+        # of a recording run with fewer neighbours than the concurrency.
+        "mean_open_sessions": sum(end_s - start_s for start_s, end_s in trace_spans_s)
+        / (
+            max(end_s for _, end_s in trace_spans_s)
+            - min(start_s for start_s, _ in trace_spans_s)
+        ),
+        "sessions": len(attempted),
+        "sessions_failed": sessions_failed,
+        "admission_denials": load["variants_with_admission_denials"],
+        "input_pacing_violations": load["input_pacing_violations"],
+        "units_expected": units_expected,
+        "units_missed": units_missed,
+        "unit_miss_rate": unit_miss_rate,
+        "unit_lag_s": quantiles(
+            [lag_s for session in sessions for lag_s in session["unit_lag_s"]]
+        ),
+        "replies": len(replies),
+        "replies_with_audio_after_text": sum(
+            reply["units_before_first_audio"] > 0 for reply in replies
+        ),
+        "first_audio_latency_s": quantiles(
+            [reply["first_audio_latency_s"] for reply in replies]
+        ),
+        "startup_buffer_needed_s": quantiles(
+            [reply["startup_buffer_needed_s"] for reply in replies]
+        ),
+        "playback_reserve_s": playback_reserve_s,
+        "replies_with_underrun": sum(reply["underrun_s"] > 0 for reply in replies),
+        "underrun_s": sum(reply["underrun_s"] for reply in replies),
+        "real_time_factor": quantiles(
+            [
+                reply["real_time_factor"]
+                for reply in replies
+                if reply["real_time_factor"] is not None
+            ]
+        ),
+        "unmet_targets": [
+            target
+            for target, is_unmet in (
+                ("no failed sessions", sessions_failed > 0),
+                ("no admission denials", load["variants_with_admission_denials"] > 0),
+                ("no input pacing violations", load["input_pacing_violations"] > 0),
+                (
+                    f"unit miss rate at most {MAX_UNIT_MISS_RATE:.0%}",
+                    unit_miss_rate > MAX_UNIT_MISS_RATE,
+                ),
+            )
+            if is_unmet
+        ],
+    }
+
+
+def serving_report(
+    run_dirs: list[Path], playback_reserve_s: float
+) -> dict[str, JsonValue]:
+    """Concurrency levels of one system and the highest one that meets the targets."""
+    levels = sorted(
+        (summarize_level(run_dir, playback_reserve_s) for run_dir in run_dirs),
+        key=lambda level: level["concurrency"],
+    )
+    concurrencies = [level["concurrency"] for level in levels]
+    if len({level["profile"] for level in levels}) != 1:
+        raise ValueError("every recording must use the same profile")
+    elif len(set(concurrencies)) != len(concurrencies):
+        raise ValueError(f"each concurrency needs one recording, got {concurrencies}")
+    else:
+        pass
+    meeting = list(
+        itertools.takewhile(lambda level: not level["unmet_targets"], levels)
+    )
+    return {
+        "levels": levels,
+        "max_concurrency_meeting_targets": (
+            meeting[-1]["concurrency"] if meeting else None
+        ),
+        # note (jeffro): when the highest recorded level still meets the targets,
+        # the capacity is at least that level and a higher one must be recorded.
+        "capacity_bounded": len(meeting) < len(levels),
     }
