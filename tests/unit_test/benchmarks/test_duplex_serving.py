@@ -8,6 +8,7 @@ from pydantic import JsonValue
 
 from benchmarks.duplex.client import SEND_RECEIPTS_FILE
 from benchmarks.duplex.serving import score_session, serving_report, summarize_level
+from benchmarks.eval import benchmark_duplex_serving
 
 # MiniCPM-o: 1000 ms units, 24 kHz output.
 PROFILE = "minicpmo-native-pr2377"
@@ -308,3 +309,52 @@ def test_turn_based_level_is_judged_by_reply_real_time_factor(tmp_path: Path) ->
     assert level["unit_miss_rate"] is None
     assert level["real_time_factor"]["p90"] == pytest.approx(1.2)
     assert level["unmet_targets"] == ["reply real-time factor p90 below 1"]
+
+
+def test_sweep_records_every_level_then_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder_calls: list[list[str]] = []
+
+    def fake_recorder(argv: list[str]) -> int:
+        recorder_calls.append(argv)
+        concurrency = int(argv[argv.index("--concurrency") + 1])
+        record_run(
+            Path(argv[argv.index("--output") + 1]), concurrency, [("pass", ON_TIME)]
+        )
+        return 1
+
+    monkeypatch.setitem(benchmark_duplex_serving.RECORDERS, "v1.5", fake_recorder)
+    sweep_dir = tmp_path / "sweep"
+    code = benchmark_duplex_serving.main(
+        ["sweep", "--dataset", "v1.5", "--concurrency", "2,1"]
+        + [
+            "--output",
+            str(sweep_dir),
+            "--",
+            "--url",
+            "ws://server",
+            "--profile",
+            PROFILE,
+        ]
+    )
+
+    assert code == 0
+    assert recorder_calls == [
+        ["record", "--url", "ws://server", "--profile", PROFILE]
+        + ["--concurrency", str(concurrency)]
+        + ["--output", str(sweep_dir / f"concurrency-{concurrency}")]
+        for concurrency in (1, 2)
+    ]
+    report = json.loads((sweep_dir / "serving.json").read_text())
+    assert [level["concurrency"] for level in report["levels"]] == [1, 2]
+    assert (sweep_dir / "SERVING.md").read_text().startswith("| N |")
+
+
+def test_sweep_refuses_recorder_options_it_sets(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        benchmark_duplex_serving.main(
+            ["sweep", "--dataset", "v1.5", "--concurrency", "1"]
+            + ["--output", str(tmp_path / "sweep"), "--", "--concurrency=4"]
+        )
+    assert not (tmp_path / "sweep").exists()

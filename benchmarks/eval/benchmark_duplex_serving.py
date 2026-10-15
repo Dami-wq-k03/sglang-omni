@@ -1,15 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Report serving timing of one duplex system across recorded concurrency levels."""
+"""Record one duplex system at several concurrency levels and report its serving timing."""
 
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 from pydantic import JsonValue
 
 from benchmarks.duplex.serving import serving_report
 from benchmarks.duplex.v15_audio import write_json
+from benchmarks.eval import benchmark_duplex_v10, benchmark_duplex_v15
+
+logger = logging.getLogger(__name__)
+RECORDERS = {"v1.0": benchmark_duplex_v10.main, "v1.5": benchmark_duplex_v15.main}
+# Options the sweep sets on every recorder run itself.
+SWEEP_OPTIONS = ("--concurrency", "--output")
 
 # note (jeffro): this is a small default startup buffer, and other values can be passed to trace the underrun curve.
 DEFAULT_PLAYBACK_RESERVE_MS = 80.0
@@ -61,31 +68,116 @@ def format_table(report: dict[str, JsonValue]) -> str:
     return "\n".join(rows) + f"\n\n{verdict}\n"
 
 
+def concurrency_levels(text: str) -> list[int]:
+    """Distinct positive levels separated by commas, such as 1,2,4,8."""
+    levels = [int(part) for part in text.split(",")]
+    if min(levels) < 1 or len(set(levels)) != len(levels):
+        raise argparse.ArgumentTypeError(
+            f"expected distinct positive levels such as 1,2,4,8, got {text!r}"
+        )
+    else:
+        return sorted(levels)
+
+
+def report(args: argparse.Namespace) -> int:
+    serving = serving_report(args.run, args.playback_reserve_ms / 1000)
+    write_json(args.output, serving)
+    print(format_table(serving))
+    return 0
+
+
+def sweep(args: argparse.Namespace) -> int:
+    args.output.mkdir(parents=True, exist_ok=False)
+    run_dirs = []
+    for concurrency in args.concurrency:
+        run_dir = args.output / f"concurrency-{concurrency}"
+        logger.info(
+            f"Recording {args.dataset} at concurrency {concurrency} -> {run_dir}"
+        )
+        # note (jeffro): the recorder exits nonzero when a session fails, which under
+        # load is a result to report, not a reason to stop the sweep.
+        RECORDERS[args.dataset](
+            [
+                "record",
+                *args.recorder_args,
+                "--concurrency",
+                str(concurrency),
+                "--output",
+                str(run_dir),
+            ]
+        )
+        run_dirs.append(run_dir)
+    serving = serving_report(run_dirs, args.playback_reserve_ms / 1000)
+    write_json(args.output / "serving.json", serving)
+    table = format_table(serving)
+    (args.output / "SERVING.md").write_text(table)
+    print(table)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    playback = argparse.ArgumentParser(add_help=False)
+    playback.add_argument(
+        "--playback-reserve-ms",
+        type=float,
+        default=DEFAULT_PLAYBACK_RESERVE_MS,
+        help="Simulated player startup buffer (default: %(default)s)",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    report_parser = commands.add_parser(
+        "report", parents=[playback], help="Report recorded runs"
+    )
+    report_parser.add_argument(
         "--run",
         type=Path,
         action="append",
         required=True,
         help="Recorded run directory, one per concurrency level",
     )
-    parser.add_argument("--output", type=Path, required=True, help="serving.json path")
-    parser.add_argument(
-        "--playback-reserve-ms",
-        type=float,
-        default=DEFAULT_PLAYBACK_RESERVE_MS,
-        help="Simulated player startup buffer (default: %(default)s)",
+    report_parser.add_argument(
+        "--output", type=Path, required=True, help="serving.json path"
     )
+    report_parser.set_defaults(handler=report)
+
+    sweep_parser = commands.add_parser(
+        "sweep",
+        parents=[playback],
+        help="Record every level against one running server, then report",
+        description="Options after -- go to the recorder's record command unchanged "
+        "(--url, --profile, --dataset-root, server identity, sample selection); the "
+        "sweep sets --concurrency and --output per level.",
+    )
+    sweep_parser.add_argument("--dataset", choices=RECORDERS, required=True)
+    sweep_parser.add_argument(
+        "--concurrency",
+        type=concurrency_levels,
+        required=True,
+        help="Levels to record, such as 1,2,4,8",
+    )
+    sweep_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="New directory for the level runs, serving.json and SERVING.md",
+    )
+    sweep_parser.add_argument("recorder_args", nargs=argparse.REMAINDER)
+    sweep_parser.set_defaults(handler=sweep)
+
     args = parser.parse_args(argv)
     if args.playback_reserve_ms < 0:
         parser.error("--playback-reserve-ms must be nonnegative")
+    elif args.command == "sweep":
+        args.recorder_args = [arg for arg in args.recorder_args if arg != "--"]
+        if any(arg.split("=")[0] in SWEEP_OPTIONS for arg in args.recorder_args):
+            parser.error(f"the sweep sets {' and '.join(SWEEP_OPTIONS)} itself")
+        else:
+            pass
     else:
         pass
-    report = serving_report(args.run, args.playback_reserve_ms / 1000)
-    write_json(args.output, report)
-    print(format_table(report))
-    return 0
+    logging.basicConfig(level=logging.INFO)
+    return args.handler(args)
 
 
 if __name__ == "__main__":
