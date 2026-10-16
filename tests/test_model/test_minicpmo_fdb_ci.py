@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Full-Duplex-Bench smoke for MiniCPM-o in the Omni CI lane.
 
-The runbook records one v1.5 pair per category and three v1.0 samples per
-subset against a live MiniCPM-o server on one GPU, then transcribes and scores
-them without a judge: `asr` already writes the v1.5 timing and the v1.0
-unified scores. The test checks that every session kept the realtime protocol
+The runbook records two v1.5 pairs per category and five v1.0 samples per
+subset against two MiniCPM-o servers, one per GPU with one session each, then
+transcribes and scores them without a judge: `asr` already writes the v1.5
+timing and the v1.0 unified scores. The subset is sized to finish in about ten
+minutes on two H100s. The test checks that every session kept the realtime protocol
 and that every selected sample was scored. It sets no quality thresholds; a
 handful of sampled generations cannot calibrate them.
 """
@@ -26,8 +27,9 @@ from benchmarks.duplex.v10_dataset import SUBSET_TASKS
 from benchmarks.duplex.v15_dataset import SUBSETS as V15_CATEGORIES
 
 RUN_NAME = "ci"
-V15_PER_SUBSET = 1
-V10_PER_SUBSET = 3
+V15_PER_SUBSET = 2
+V10_PER_SUBSET = 5
+GPUS = "0,1"
 
 
 def read_json(path: Path) -> dict:
@@ -78,6 +80,10 @@ def test_minicpmo_full_duplex_bench_smoke() -> None:
         str(V15_PER_SUBSET),
         "--v10-per-subset",
         str(V10_PER_SUBSET),
+        "--gpus",
+        GPUS,
+        "--num-shards",
+        str(len(GPUS.split(","))),
     )
     runbook(env, "asr", "--run-name", RUN_NAME)
     runbook(env, "aggregate", "--run-name", RUN_NAME)
