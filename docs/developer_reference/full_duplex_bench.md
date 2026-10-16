@@ -212,7 +212,7 @@ Per-run choices (`--run-name`, `--repeat`, sample selection, `--num-shards`, `--
 |---|---|---|
 | `FDB_WORK` | `$HOME/fdb` | Root for downloads, environments and results |
 | `JUDGE` | `qwen` | `qwen` or `gpt` |
-| `CUDA_VISIBLE_DEVICES` | unset | The one GPU index this job uses. See [Running jobs in parallel](#running-jobs-in-parallel) |
+| `CUDA_VISIBLE_DEVICES` | unset | The GPU indices this job may use. The first is the job GPU: it runs the one model server of `generate`, `asr` and `judge`; `generate --gpus` may list any of the others. See [Running jobs in parallel](#running-jobs-in-parallel) |
 | `GPU` | `0` | The GPU index when `CUDA_VISIBLE_DEVICES` is unset |
 | `SERVER_PORT`, `JUDGE_PORT` | `8097 + 10×GPU`, `30000 + 10×GPU` | Local ports. The judge also uses the next port for NCCL. Avoid 29500-29899, which the model server uses for NCCL |
 | `MODEL_PATH` | `$FDB_WORK/models/MiniCPM-o-4_5` | Checkpoint of the model under test |
@@ -242,7 +242,7 @@ The ports, the judge config and the compile caches follow the GPU index: the mod
 
 - **Keep the settings fixed across the repeats of a run.** Mixing repeats with different selections, `--num-shards` or judges makes their mean meaningless; use a new run name instead.
 - **`--num-shards` changes what you measure.** With `--num-shards 2`, two sessions share the GPU, so the latencies are measured under load and do not compare with one shard. The model server keeps `max_sessions` at 2, so `generate` refuses more than 2 shards per server up front.
-- **`--gpus` spreads the shards over GPUs.** `--gpus 0,1` starts one model server on each listed GPU, each with its own port (`8097 + 10×GPU`) and caches, and sends shard i to the i-th server modulo their count. With as many shards as GPUs every session has a GPU to itself, so the timing compares with one shard. `asr` and `judge` still run on the job GPU.
+- **`--gpus` spreads the shards over GPUs.** `--gpus 0,1` starts one model server on each listed GPU, each with its own port (`8097 + 10×GPU`) and caches, and sends shard i to the i-th server modulo their count. With as many shards as GPUs every session has a GPU to itself, so the timing compares with one shard. `asr` and `judge` still run on the job GPU, the first index of `CUDA_VISIBLE_DEVICES`, so `CUDA_VISIBLE_DEVICES=0,1` with `--gpus 0,1` records on both GPUs and transcribes on GPU 0.
 - **The first N samples are not a random sample.** They give fast numbers that compare between runs, not estimates for the full dataset.
 - **Failed sessions are never dropped.** They stay in the denominators as ineligible, and an empty set of intervals shows as `n/a`, not as zero.
 
@@ -265,8 +265,10 @@ The ports, the judge config and the compile caches follow the GPU index: the mod
 | `ERROR: --num-shards N leaves model servers idle` | Use at least as many shards as GPUs in `--gpus` |
 | `ERROR: SERVER_PORT gives every model server the same port` | Unset `SERVER_PORT` when `--gpus` lists several GPUs; each server then derives its port from its GPU |
 | HTTP 503 in a record log | Another client may hold the server's sessions; check for competing recordings |
-| `ERROR: set CUDA_VISIBLE_DEVICES to exactly one GPU index`, or `--device cuda needs exactly one visible GPU` | Export a single index, a different one in each terminal |
-| `ERROR: GPU and CUDA_VISIBLE_DEVICES disagree` | Unset `GPU`, or set it to the same index |
+| `ERROR: CUDA_VISIBLE_DEVICES must list distinct numeric GPU indices` | Export indices such as `0` or `0,1`, not GPU UUIDs |
+| `ERROR: --gpus ... reaches outside CUDA_VISIBLE_DEVICES` | List only GPUs that `CUDA_VISIBLE_DEVICES` names, or widen it |
+| `--device cuda needs exactly one visible GPU` (manual ASR command) | Export a single index for that command |
+| `ERROR: GPU and CUDA_VISIBLE_DEVICES disagree` | Unset `GPU`, or set it to the first index |
 | `WARNING: a v1.5 phase reported failures` | Rerun the command the warning prints; it adds `--retry-failed` |
 | `WARNING: the v1.0 ASR failed` | `repeat-N/v10/reference/logs/asr.log` has the official script's output and the terminal has the traceback. A rerun of `asr` transcribes every v1.0 sample again |
 | `WARNING: v1.0 unified scoring failed` | ASR completed, but the saved export, transcript or annotation did not score. Fix the stated cause and run the CPU-only backfill command printed in the warning; it does not repeat ASR or v1.5 work. Rerun `aggregate` to refresh `RESULTS.md` |

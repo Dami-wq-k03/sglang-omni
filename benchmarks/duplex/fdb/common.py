@@ -211,34 +211,43 @@ def session_timeout(name: str, default: str) -> str:
     return text
 
 
-def resolve_visible_gpu() -> str:
-    """The one GPU this job uses.
+def visible_devices() -> tuple[str, ...]:
+    """The GPU indices ``CUDA_VISIBLE_DEVICES`` lists, which must be set."""
+    visible = os.environ["CUDA_VISIBLE_DEVICES"].strip()
+    if not visible:
+        raise SystemExit("ERROR: CUDA_VISIBLE_DEVICES is empty.")
+    else:
+        pass
+    devices = tuple(part.strip() for part in visible.split(","))
+    if not all(device.isdigit() for device in devices) or len(set(devices)) != len(
+        devices
+    ):
+        raise SystemExit(
+            "ERROR: CUDA_VISIBLE_DEVICES must list distinct numeric GPU indices "
+            f"(got {visible!r})."
+        )
+    else:
+        pass
+    return devices
 
-    ``CUDA_VISIBLE_DEVICES`` wins, so each terminal can export a different
-    index and the default ``GPU=0`` does not put every job on card 0.
-    ``GPU`` is used only when ``CUDA_VISIBLE_DEVICES`` is unset.
+
+def resolve_visible_gpu() -> str:
+    """The job GPU: it runs generate's one model server unless --gpus lists
+    more, runs asr and judge, and names the ports and caches.
+
+    ``CUDA_VISIBLE_DEVICES`` wins, so each terminal can export its own
+    indices; the job GPU is the first one. ``GPU`` is used only when
+    ``CUDA_VISIBLE_DEVICES`` is unset.
     """
     if "CUDA_VISIBLE_DEVICES" in os.environ:
-        visible = os.environ["CUDA_VISIBLE_DEVICES"].strip()
-        if not visible:
-            raise SystemExit("ERROR: CUDA_VISIBLE_DEVICES is empty.")
-        else:
-            pass
-        devices = [part.strip() for part in visible.split(",") if part.strip()]
-        if len(devices) != 1:
-            raise SystemExit(
-                "ERROR: set CUDA_VISIBLE_DEVICES to exactly one GPU index "
-                f"(got {visible!r})."
-            )
-        else:
-            pass
-        gpu = devices[0]
+        gpu = visible_devices()[0]
         explicit_gpu = os.environ.get("GPU")
         if explicit_gpu is not None and explicit_gpu.strip() not in {"", gpu}:
             raise SystemExit(
                 "ERROR: GPU and CUDA_VISIBLE_DEVICES disagree "
-                f"(GPU={explicit_gpu!r}, CUDA_VISIBLE_DEVICES={visible!r}). "
-                "Unset GPU, or set it to the same index."
+                f"(GPU={explicit_gpu!r}, "
+                f"CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']!r}). "
+                "Unset GPU, or set it to the first index."
             )
         else:
             pass

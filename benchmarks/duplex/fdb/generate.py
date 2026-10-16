@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from benchmarks.duplex.fdb.common import (
     log,
     log_tail,
     run_command,
+    visible_devices,
 )
 from benchmarks.duplex.fdb.selection import (
     SampleSelection,
@@ -241,6 +243,14 @@ def generate(
             f"ERROR: --num-shards {num_shards} over {len(gpus)} GPU(s) exceeds the "
             f"model server's max_sessions {DEFAULT_MAX_SESSIONS}; it rejects extra "
             "connections with HTTP 503."
+        )
+    elif "CUDA_VISIBLE_DEVICES" in os.environ and not set(gpus) <= set(
+        visible_devices()
+    ):
+        raise SystemExit(
+            f"ERROR: --gpus {','.join(gpus)} reaches outside "
+            f"CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}; list only "
+            "visible GPUs."
         )
     elif len({replica.server_port for replica in replicas}) < len(replicas):
         raise SystemExit(

@@ -84,12 +84,17 @@ def test_explicit_ports_override_the_gpu_offset(
     assert settings.judge_port == DEFAULT_JUDGE_PORT
 
 
-def test_two_visible_devices_are_rejected(
+def test_the_first_visible_device_is_the_job_gpu(
     clean_job_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
-    with pytest.raises(SystemExit, match="exactly one GPU"):
-        load_settings("isolation")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,0")
+    settings = load_settings("isolation")
+    assert settings.gpu == "1"
+    assert settings.server_port == DEFAULT_SERVER_PORT + JOB_PORT_STRIDE
+    for visible in ("0,0", "GPU-973ab323", "0,"):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+        with pytest.raises(SystemExit, match="distinct numeric GPU indices"):
+            load_settings("isolation")
 
 
 def test_gpu_and_visible_device_must_agree(

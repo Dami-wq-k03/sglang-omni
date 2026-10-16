@@ -758,6 +758,49 @@ def test_asr_runs_the_v10_pass_after_the_v15_phases_and_names_its_log(
     assert not any(V10_CLI in command for command, _ in calls)
 
 
+def test_two_visible_gpus_record_on_both_and_transcribe_on_the_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # note (luojiaxuan): .github/scripts/ci_env.sh exports CUDA_VISIBLE_DEVICES=0,1.
+    for name in ("GPU", "SERVER_PORT", "JUDGE_PORT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("FDB_WORK", str(tmp_path / "fdb"))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    settings = load_settings("both")
+    assert settings.gpu == "0"
+    stage_datasets(settings)
+    servers, _, _ = stub_generate_phases(monkeypatch)
+    v15_only = SampleSelection(per_subset=1)
+    generate_module.generate(
+        settings, 1, v15_only, SampleSelection(per_subset=0), 2, ("0", "1")
+    )
+    assert [replica.gpu for replica, _ in servers] == ["0", "1"]
+    with pytest.raises(
+        SystemExit, match="--gpus 1,2 reaches outside CUDA_VISIBLE_DEVICES=0,1"
+    ):
+        generate_module.generate(
+            load_settings("outside"),
+            1,
+            v15_only,
+            SampleSelection(per_subset=0),
+            2,
+            ("1", "2"),
+        )
+    assert not load_settings("outside").repeat_dir(1).exists()
+
+    visible = []
+    monkeypatch.setattr(
+        asr_module,
+        "run_command",
+        lambda command, visible_gpus=None: visible.append(visible_gpus) or True,
+    )
+    scored = load_settings("scored")
+    stage_scored_repeat(scored, V10_IDS)
+    asr_module.asr(scored, 1, False)
+    # note (luojiaxuan): v1.5 ASR, v1.5 timing, v1.0 ASR, v1.0 unified scoring.
+    assert visible == ["0", "", "0", ""]
+
+
 def stub_judge_phases(
     monkeypatch: pytest.MonkeyPatch, failing_subset: str | None
 ) -> list:
