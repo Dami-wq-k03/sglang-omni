@@ -1,28 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Full-Duplex-Bench smoke for MiniCPM-o in the Omni CI lane.
-
-The runbook records two v1.5 pairs per category and five v1.0 samples per
-subset against two MiniCPM-o servers, one per GPU with one session each, then
-transcribes and scores them without a judge: `asr` already writes the v1.5
-timing and the v1.0 unified scores. The subset is sized to finish in about ten
-minutes on two H100s. The test checks that every session kept the realtime protocol
-and that every selected sample was scored. It sets no quality thresholds; a
-handful of sampled generations cannot calibrate them.
-"""
+"""MiniCPM-o FDB protocol, coverage, and calibrated regression smoke on two H100s."""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
+from pydantic import JsonValue
 
 from benchmarks.duplex.fdb.common import DEFAULT_MODEL_REVISION, MODEL_ID
+from benchmarks.duplex.run_artifacts import file_sha256
 from benchmarks.duplex.v10_dataset import SUBSET_TASKS
 from benchmarks.duplex.v15_dataset import SUBSETS as V15_CATEGORIES
 
@@ -31,8 +26,47 @@ V15_PER_SUBSET = 2
 V10_PER_SUBSET = 5
 GPUS = "0,1"
 
+# Note (wenyao): PR #2864's five H100 DP2 runs fix the raw baseline independently of CI slack.
+STOP_MEAN_S_REF = 1.432
+RESPONSE_MEAN_S_REF = 2.7152727272727275
+TURN_RESPONSE_RATE_REF = 1.0
+INTERRUPTION_SPEAKING_AT_END_RATE_REF = 0.5
+SYNTHETIC_PAUSE_INTRUSION_RATE_REF = 0.2
+CANDOR_PAUSE_INTRUSION_RATE_REF = 0.0
+LATENCY_TOLERANCE = 1.25
+RATE_SAMPLE_TOLERANCE = 1
 
-def read_json(path: Path) -> dict:
+TIMING_LIMITS = {
+    "latency_stop_list": (6, STOP_MEAN_S_REF * LATENCY_TOLERANCE),
+    "latency_resp_list": (9, RESPONSE_MEAN_S_REF * LATENCY_TOLERANCE),
+}
+RATE_LIMITS = (
+    ("candor_turn_taking", "response_rate_5s", 5, TURN_RESPONSE_RATE_REF, 1.0),
+    (
+        "synthetic_user_interruption",
+        "speaking_at_end_rate",
+        4,
+        0.0,
+        INTERRUPTION_SPEAKING_AT_END_RATE_REF,
+    ),
+    (
+        "synthetic_pause_handling",
+        "pause_intrusion_rate",
+        5,
+        0.0,
+        SYNTHETIC_PAUSE_INTRUSION_RATE_REF,
+    ),
+    (
+        "candor_pause_handling",
+        "pause_intrusion_rate",
+        5,
+        0.0,
+        CANDOR_PAUSE_INTRUSION_RATE_REF,
+    ),
+)
+
+
+def read_json(path: Path) -> dict[str, JsonValue]:
     return json.loads(path.read_text())
 
 
@@ -44,7 +78,7 @@ def runbook(env: dict[str, str], *arguments: str) -> None:
     )
 
 
-def variant_statuses(recording: Path) -> Counter:
+def variant_statuses(recording: Path) -> Counter[str]:
     return Counter(
         variant["status"]
         for run in recording.glob("shard-*/run.json")
@@ -87,7 +121,10 @@ def test_minicpmo_full_duplex_bench_smoke() -> None:
     )
     runbook(env, "asr", "--run-name", RUN_NAME)
     runbook(env, "aggregate", "--run-name", RUN_NAME)
+    assert_fdb_results(run_root)
 
+
+def assert_fdb_results(run_root: Path) -> None:
     repeat = run_root / "repeat-1"
     pairs = V15_PER_SUBSET * len(V15_CATEGORIES)
     v10_samples = V10_PER_SUBSET * len(SUBSET_TASKS)
@@ -97,10 +134,25 @@ def test_minicpmo_full_duplex_bench_smoke() -> None:
     assert manifest["counts"]["eligible_pairs"] == pairs
 
     samples = repeat / "scores" / "engines" / "minicpmo" / "samples"
-    assert Counter(
-        read_json(receipt)["status"]
-        for receipt in samples.glob("*/*/receipts/timing-overlap.json")
-    ) == {"ok": pairs}
+    receipts = list(samples.glob("*/*/receipts/timing-overlap.json"))
+    assert Counter(read_json(path)["status"] for path in receipts) == {"ok": pairs}
+    intervals: dict[str, list[float]] = {name: [] for name in TIMING_LIMITS}
+    for path in receipts:
+        interval_path = path.parent.parent / "latency_intervals.json"
+        assert (
+            file_sha256(interval_path) == read_json(path)["intervals_sha256"]
+        ), f"Timing intervals changed after scoring: {interval_path}"
+        document = read_json(interval_path)
+        for name in intervals:
+            intervals[name].extend(end - start for start, end in document[name])
+    for name, (minimum_intervals, maximum_mean_s) in TIMING_LIMITS.items():
+        values = intervals[name]
+        assert (
+            len(values) >= minimum_intervals
+        ), f"{name}: insufficient timing intervals"
+        assert all(math.isfinite(value) and value >= 0 for value in values), name
+        mean_s = statistics.fmean(values)
+        assert mean_s <= maximum_mean_s, f"{name}: {mean_s} > {maximum_mean_s} s"
 
     unified = read_json(repeat / "v10" / "reference" / "unified.json")
     # note (luojiaxuan): the unified scorer leaves backchannel to the official
@@ -111,4 +163,21 @@ def test_minicpmo_full_duplex_bench_smoke() -> None:
     for subset, entry in unified["subsets"].items():
         assert entry["counts"]["selected"] == V10_PER_SUBSET, subset
         assert entry["counts"]["eligible"] == V10_PER_SUBSET, subset
+    for subset, metric, minimum_n, reference_lower, reference_upper in RATE_LIMITS:
+        rate = unified["subsets"][subset]["metrics"][metric]
+        count, n, value = rate["count"], rate["n"], rate["value"]
+        assert (
+            isinstance(n, int) and minimum_n <= n <= V10_PER_SUBSET
+        ), f"{subset}/{metric}: insufficient metric coverage, n={n}"
+        assert (
+            isinstance(count, int) and 0 <= count <= n
+        ), f"{subset}/{metric}: {count}/{n}"
+        assert isinstance(value, (int, float)) and math.isfinite(value), metric
+        assert math.isclose(value, count / n), f"{subset}/{metric}: inconsistent rate"
+        tolerance = RATE_SAMPLE_TOLERANCE / minimum_n
+        lower = max(0.0, reference_lower - tolerance)
+        upper = min(1.0, reference_upper + tolerance)
+        assert (
+            lower <= value <= upper
+        ), f"{subset}/{metric}: {value} outside [{lower}, {upper}]"
     assert (run_root / "RESULTS.md").is_file()
