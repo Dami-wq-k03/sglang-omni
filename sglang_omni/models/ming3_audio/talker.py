@@ -321,13 +321,9 @@ class Ming3SpeechGenerator:
                 sample_frequency=SPEAKER_SAMPLE_RATE,
             )
             features -= features.mean(dim=0, keepdim=True)
+            speaker_input_name = self.speaker_encoder.get_inputs()[0].name
             speaker_vector = self.speaker_encoder.run(
-                None,
-                {
-                    self.speaker_encoder.get_inputs()[0].name: features.unsqueeze(
-                        0
-                    ).numpy()
-                },
+                None, {speaker_input_name: features.unsqueeze(0).numpy()}
             )[0]
             speaker_embedding = talker.spk_head(
                 torch.from_numpy(speaker_vector).to(self.device, dtype=torch.bfloat16)
