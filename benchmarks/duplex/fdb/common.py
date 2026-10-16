@@ -211,44 +211,37 @@ def session_timeout(name: str, default: str) -> str:
     return text
 
 
-def visible_devices() -> tuple[str, ...]:
-    """The GPU indices ``CUDA_VISIBLE_DEVICES`` lists, which must be set."""
-    visible = os.environ["CUDA_VISIBLE_DEVICES"].strip()
-    if not visible:
-        raise SystemExit("ERROR: CUDA_VISIBLE_DEVICES is empty.")
-    else:
-        pass
-    devices = tuple(part.strip() for part in visible.split(","))
-    if not all(device.isdigit() for device in devices) or len(set(devices)) != len(
-        devices
-    ):
-        raise SystemExit(
-            "ERROR: CUDA_VISIBLE_DEVICES must list distinct numeric GPU indices "
-            f"(got {visible!r})."
-        )
-    else:
-        pass
-    explicit_gpu = os.environ.get("GPU")
-    if explicit_gpu is not None and explicit_gpu.strip() not in {"", *devices[:1]}:
-        raise SystemExit(
-            "ERROR: GPU and CUDA_VISIBLE_DEVICES disagree "
-            f"(GPU={explicit_gpu!r}, CUDA_VISIBLE_DEVICES={visible!r}). "
-            "Unset GPU, or set it to the first index."
-        )
-    else:
-        pass
-    return devices
-
-
 def resolve_visible_gpu() -> str:
-    """The job GPU: it runs asr and judge and names the ports and caches.
+    """The one GPU this job uses.
 
-    ``CUDA_VISIBLE_DEVICES`` wins, so each terminal can export different
-    indices; the job GPU is the first one. ``GPU`` is used only when
-    ``CUDA_VISIBLE_DEVICES`` is unset.
+    ``CUDA_VISIBLE_DEVICES`` wins, so each terminal can export a different
+    index and the default ``GPU=0`` does not put every job on card 0.
+    ``GPU`` is used only when ``CUDA_VISIBLE_DEVICES`` is unset.
     """
     if "CUDA_VISIBLE_DEVICES" in os.environ:
-        gpu = visible_devices()[0]
+        visible = os.environ["CUDA_VISIBLE_DEVICES"].strip()
+        if not visible:
+            raise SystemExit("ERROR: CUDA_VISIBLE_DEVICES is empty.")
+        else:
+            pass
+        devices = [part.strip() for part in visible.split(",") if part.strip()]
+        if len(devices) != 1:
+            raise SystemExit(
+                "ERROR: set CUDA_VISIBLE_DEVICES to exactly one GPU index "
+                f"(got {visible!r})."
+            )
+        else:
+            pass
+        gpu = devices[0]
+        explicit_gpu = os.environ.get("GPU")
+        if explicit_gpu is not None and explicit_gpu.strip() not in {"", gpu}:
+            raise SystemExit(
+                "ERROR: GPU and CUDA_VISIBLE_DEVICES disagree "
+                f"(GPU={explicit_gpu!r}, CUDA_VISIBLE_DEVICES={visible!r}). "
+                "Unset GPU, or set it to the same index."
+            )
+        else:
+            pass
     else:
         gpu = env_text("GPU", "0")
     if not gpu.isdigit():
@@ -256,29 +249,6 @@ def resolve_visible_gpu() -> str:
     else:
         pass
     return gpu
-
-
-def job_gpus() -> tuple[str, ...]:
-    """The GPUs generate starts a model server on: the ``CUDA_VISIBLE_DEVICES``
-    indices, else ``GPU``, else every GPU that nvidia-smi lists."""
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        return visible_devices()
-    elif os.environ.get("GPU"):
-        return (resolve_visible_gpu(),)
-    else:
-        try:
-            listed = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.split()
-        except FileNotFoundError:
-            raise SystemExit(
-                "ERROR: nvidia-smi is not available; set CUDA_VISIBLE_DEVICES to "
-                "the GPU indices to use."
-            ) from None
-        return tuple(listed)
 
 
 def derived_port(env_name: str, base_port: int, gpu: str) -> int:
