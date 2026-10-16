@@ -124,15 +124,14 @@ def create_audio_encoder_executor(
     device: str | None = None,
     gpu_id: int | None = None,
 ) -> SimpleScheduler:
+    resolved_device = resolve_concrete_device(device, gpu_id)
     configuration = json.loads((Path(model_path) / "config.json").read_text())
     encoder = Ming3AudioEncoder(
         AudioEncoderConfig.model_validate(configuration["audio_config"]),
         configuration["text_config"]["hidden_size"],
     )
     encoder.load_checkpoint(model_path)
-    encoder = encoder.eval().to(
-        resolve_concrete_device(device, gpu_id), dtype=torch.bfloat16
-    )
+    encoder = encoder.eval().to(resolved_device, dtype=torch.bfloat16)
 
     @torch.inference_mode()
     def encode(payload: StagePayload) -> StagePayload:
@@ -160,6 +159,7 @@ def create_thinker_executor(
     server_args_overrides: dict[str, JsonValue] | None = None,
     total_gpu_memory_fraction: float | None = None,
 ) -> OmniScheduler:
+    resolved_device = resolve_concrete_device(device, gpu_id)
     AutoConfig.register(Ming3AudioConfig.model_type, Ming3AudioConfig, exist_ok=True)
     ModelRegistry.models["BailingMoeV3ForCausalLM"] = Ming3AudioThinker
     overrides = dict(server_args_overrides or {})
@@ -178,7 +178,7 @@ def create_thinker_executor(
     worker, tree_cache, request_pool, token_pool, model_config = (
         create_sglang_infrastructure(
             server_args,
-            resolve_concrete_device(device, gpu_id).index or 0,
+            resolved_device.index or 0,
             tp_rank=tp_rank,
             nccl_port=nccl_port,
             total_gpu_memory_fraction=total_gpu_memory_fraction,
