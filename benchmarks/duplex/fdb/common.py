@@ -17,7 +17,7 @@ import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Literal
 
@@ -154,10 +154,10 @@ class Settings:
             "JUDGE_CONFIG": str(self.judge_dir / "judge-config.json"),
         }
 
-    def apply_job_isolation(self) -> None:
-        """Give this GPU its own compile and dynamic-module caches.
+    def cache_env(self) -> dict[str, str]:
+        """This GPU's own compile and dynamic-module caches, created on first use.
 
-        Two jobs writing one Triton, Inductor, DeepGEMM, CUDA, NeMo or
+        Two processes writing one Triton, Inductor, DeepGEMM, CUDA, NeMo or
         Transformers dynamic-module directory corrupt it.
         """
         cache_root = self.fdb_work / "cache" / f"gpu-{self.gpu}"
@@ -169,9 +169,20 @@ class Settings:
             "HF_MODULES_CACHE": cache_root / "hf-modules",
             "NEMO_CACHE_DIR": cache_root / "nemo",
         }
-        for name, path in assignments.items():
+        for path in assignments.values():
             path.mkdir(parents=True, exist_ok=True)
-            os.environ[name] = str(path)
+        return {name: str(path) for name, path in assignments.items()}
+
+    def apply_job_isolation(self) -> None:
+        os.environ.update(self.cache_env())
+
+    def on_gpu(self, gpu: str) -> Settings:
+        """The same job with its model server on another GPU and that GPU's port."""
+        return replace(
+            self,
+            gpu=gpu,
+            server_port=derived_port("SERVER_PORT", DEFAULT_SERVER_PORT, gpu),
+        )
 
 
 def env_text(name: str, default: str) -> str:
