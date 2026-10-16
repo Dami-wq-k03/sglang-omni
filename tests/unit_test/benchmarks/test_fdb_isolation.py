@@ -17,6 +17,7 @@ from benchmarks.duplex.fdb.common import (
     DEFAULT_SERVER_PORT,
     JOB_PORT_STRIDE,
     NCCL_PORT_END,
+    job_gpus,
     load_settings,
 )
 from benchmarks.duplex.fdb.generate import generate
@@ -84,12 +85,30 @@ def test_explicit_ports_override_the_gpu_offset(
     assert settings.judge_port == DEFAULT_JUDGE_PORT
 
 
-def test_two_visible_devices_are_rejected(
+def test_generate_uses_every_visible_gpu_and_the_job_gpu_is_the_first(
     clean_job_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
-    with pytest.raises(SystemExit, match="exactly one GPU"):
-        load_settings("isolation")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
+    assert load_settings("isolation").gpu == "2"
+    assert job_gpus() == ("2", "3")
+    monkeypatch.setenv("GPU", "2")
+    assert job_gpus() == ("2", "3")
+    for visible in ("0,0", "GPU-973ab323", "0,"):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+        with pytest.raises(SystemExit, match="distinct numeric GPU indices"):
+            load_settings("isolation")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
+    assert job_gpus() == ("2",)
+
+
+def test_generate_takes_every_gpu_nvidia_smi_lists_without_a_choice(
+    clean_job_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listed = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="0\n1\n"))
+    monkeypatch.setattr("benchmarks.duplex.fdb.common.subprocess.run", listed)
+    assert job_gpus() == ("0", "1")
+    assert listed.call_args.args[0][0] == "nvidia-smi"
+    assert load_settings("isolation").gpu == "0"
 
 
 def test_gpu_and_visible_device_must_agree(

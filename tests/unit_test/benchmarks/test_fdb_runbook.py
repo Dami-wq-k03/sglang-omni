@@ -243,6 +243,21 @@ def test_generate_all_stages_chains_the_steps_and_stops_at_a_failure(
     assert [name for name, _, _ in calls] == ["generate", "asr"]
 
 
+def test_generate_defaults_to_one_shard_per_visible_gpu(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+    monkeypatch.setattr(runbook_cli, "load_settings", lambda run_name: settings)
+    monkeypatch.setattr(runbook_cli, "job_gpus", lambda: ("0", "1"))
+    monkeypatch.setattr(
+        runbook_cli, "generate_stages", lambda *arguments: calls.append(arguments)
+    )
+    for argv, num_shards in ((["generate"], 2), (["generate", "--num-shards", "4"], 4)):
+        monkeypatch.setattr(sys, "argv", ["fdb", *argv])
+        runbook_cli.main()
+        assert calls.pop()[-3:] == (num_shards, ("0", "1"), False)
+
+
 def test_leave_out_hint_names_an_option_change_the_parser_accepts() -> None:
     # note (luojiaxuan): the count-mode hint must parse next to a count selection;
     # the other two modes tell the user which option to drop.

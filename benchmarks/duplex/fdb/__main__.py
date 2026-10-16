@@ -9,7 +9,8 @@ Run from the repository root with the sglang-omni venv active:
     python -m benchmarks.duplex.fdb aggregate --run-name smoke
 
 `generate --all-stages` runs asr, judge and aggregate after it, so the four
-lines above become one.
+lines above become one. generate starts a model server on every visible GPU
+(set CUDA_VISIBLE_DEVICES to choose them); asr and judge run on the first.
 
 Each dataset has its own selection options; a count of 0 leaves it out.
 """
@@ -26,7 +27,13 @@ from types import FrameType
 
 from benchmarks.duplex.fdb.aggregate import aggregate
 from benchmarks.duplex.fdb.asr import asr
-from benchmarks.duplex.fdb.common import Settings, configure_logging, load_settings, log
+from benchmarks.duplex.fdb.common import (
+    Settings,
+    configure_logging,
+    job_gpus,
+    load_settings,
+    log,
+)
 from benchmarks.duplex.fdb.generate import generate
 from benchmarks.duplex.fdb.judge import judge
 from benchmarks.duplex.fdb.selection import (
@@ -134,16 +141,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument(
         "--num-shards",
         type=int,
-        default=1,
-        help="Parallel sessions, spread over the model servers; refused above "
-        "their max_sessions (default: %(default)s)",
-    )
-    generate_parser.add_argument(
-        "--gpus",
-        type=parse_gpus,
-        metavar="0,1,...",
-        help="One model server on each of these GPUs, shard i on the i-th mod "
-        "their count (default: the job GPU)",
+        help="Parallel sessions, shard i on the model server of the i-th visible "
+        "GPU mod their count; refused above their max_sessions (default: one "
+        "per visible GPU)",
     )
     generate_parser.add_argument(
         "--all-stages",
@@ -214,17 +214,6 @@ def sample_selection(
     return v15_selection, v10_selection
 
 
-def parse_gpus(text: str) -> tuple[str, ...]:
-    """Distinct GPU indices separated by commas, such as 0,1."""
-    gpus = tuple(part.strip() for part in text.split(","))
-    if not all(gpu.isdigit() for gpu in gpus) or len(set(gpus)) != len(gpus):
-        raise argparse.ArgumentTypeError(
-            f"expected distinct GPU indices such as 0,1, got {text!r}"
-        )
-    else:
-        return gpus
-
-
 def generate_stages(
     settings: Settings,
     repeat: int,
@@ -270,12 +259,13 @@ def main() -> None:
     if args.command == "setup":
         setup(settings)
     elif args.command == "generate":
+        gpus = job_gpus()
         generate_stages(
             settings,
             args.repeat,
             *sample_selection(parser, args),
-            args.num_shards,
-            (settings.gpu,) if args.gpus is None else args.gpus,
+            len(gpus) if args.num_shards is None else args.num_shards,
+            gpus,
             args.all_stages,
         )
     elif args.command == "asr":

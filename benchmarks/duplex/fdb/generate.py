@@ -233,8 +233,9 @@ def generate(
     # note (wenyao): model_server_command uses the default session capacity.
     if num_shards < len(gpus):
         raise SystemExit(
-            f"ERROR: --num-shards {num_shards} leaves model servers idle; "
-            f"use at least one shard per GPU in --gpus ({len(gpus)})."
+            f"ERROR: --num-shards {num_shards} leaves model servers idle on "
+            f"{len(gpus)} GPUs; use at least one shard per GPU, or list fewer GPUs "
+            "in CUDA_VISIBLE_DEVICES."
         )
     elif math.ceil(num_shards / len(gpus)) > DEFAULT_MAX_SESSIONS:
         raise SystemExit(
@@ -245,7 +246,7 @@ def generate(
     elif len({replica.server_port for replica in replicas}) < len(replicas):
         raise SystemExit(
             "ERROR: SERVER_PORT gives every model server the same port; unset it "
-            "so each GPU in --gpus derives its own."
+            "so each visible GPU derives its own."
         )
     else:
         pass
