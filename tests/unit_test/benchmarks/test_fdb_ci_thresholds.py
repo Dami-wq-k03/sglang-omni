@@ -3,12 +3,56 @@
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from pydantic import JsonValue
 
 from tests.test_model import test_minicpmo_fdb_ci as fdb_ci
+
+
+@pytest.mark.parametrize(
+    "marker_arguments,expected_exit_code,selected",
+    [
+        pytest.param(
+            ["-m", "not benchmark and not accelerator"],
+            pytest.ExitCode.NO_TESTS_COLLECTED,
+            False,
+            id="cpu-unit",
+        ),
+        pytest.param(
+            ["-m", "accelerator and not benchmark"],
+            pytest.ExitCode.NO_TESTS_COLLECTED,
+            False,
+            id="accelerator-unit",
+        ),
+        pytest.param([], pytest.ExitCode.OK, True, id="dedicated-fdb-stage"),
+    ],
+)
+def test_smoke_is_selected_only_by_dedicated_stage(
+    marker_arguments: list[str], expected_exit_code: pytest.ExitCode, selected: bool
+) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            str(Path(fdb_ci.__file__).resolve()),
+            *marker_arguments,
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == expected_exit_code, result.stdout + result.stderr
+    assert ("::test_minicpmo_full_duplex_bench_smoke" in result.stdout) == selected
 
 
 def write_json(path: Path, document: dict[str, JsonValue]) -> None:

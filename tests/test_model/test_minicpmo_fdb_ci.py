@@ -13,6 +13,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+import pytest
 from huggingface_hub import snapshot_download
 from pydantic import JsonValue
 
@@ -20,6 +21,8 @@ from benchmarks.duplex.fdb.common import DEFAULT_MODEL_REVISION, MODEL_ID
 from benchmarks.duplex.run_artifacts import file_sha256
 from benchmarks.duplex.v10_dataset import SUBSET_TASKS
 from benchmarks.duplex.v15_dataset import SUBSETS as V15_CATEGORIES
+
+pytestmark = pytest.mark.benchmark
 
 RUN_NAME = "ci"
 V15_PER_SUBSET = 2
