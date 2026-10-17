@@ -633,8 +633,8 @@ method Omni’s event loops never call, which disables them without an error.
 When a constructor gains or loses fields, pass the new shape;
 a helper that filters kwargs by signature or branches on field layout keeps
 two versions alive.</p>
-<p><strong>The boot sequence.</strong> <code class="docutils literal notranslate"><span class="pre">ModelWorker</span></code> and the MLX worker run upstream’s worker
-boot themselves: publish the resolved config together with the process
+<p><strong>The boot sequence.</strong> <code class="docutils literal notranslate"><span class="pre">ModelWorker</span></code> runs upstream’s worker
+boot itself: publish the resolved config together with the process
 placement, run the parallel runtime phase, run the layer runtime phase, then
 build the runner. The order and the arguments of each step are upstream’s, and
 a step that upstream adds in front of the runner is not an import change. One
