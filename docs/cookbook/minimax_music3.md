@@ -81,7 +81,7 @@ The test covers resident/offload execution, RAM/file sources, eager/graph/compil
 
 Set `MINIMAX_MUSIC3_TEST_REQUIRE_32G_LIMIT=1` to require a cgroup memory limit of at most 32 GiB for file-backed modes. Set `MINIMAX_MUSIC3_TEST_COLD_WAKE=1` to evict runtime shard pages before the first request. The memory context artifact records the limit and OOM event counters before and after each mode.
 
-#### Validation Record
+### Validation Record
 
 Validated on one NVIDIA H200 on 2026-10-07 using the newest published `hongccc/sglang-omni:dev` image (published 2026-09-08), digest `sha256:ebe4239e29a764ee3a2806385c061c5fd438a26f01458e503d3822dcba5790df`. The container used repository pin `sglang==0.5.21`, `torch_memory_saver==0.0.10`, and PyTorch `2.13.0+cu130`. The checkpoint revision was `fbdf52fbaaca799592917417eb05f1899f1255ec`, with a 4 GiB AR KV budget.
 
