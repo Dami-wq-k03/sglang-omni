@@ -897,6 +897,12 @@ passes to the factory in code (wiring, not configuration). A user-set
 <li><p><code class="docutils literal notranslate"><span class="pre">tensor_parallel_server_args_overrides(stage_name,</span> <span class="pre">tp_size)</span></code> /
 <code class="docutils literal notranslate"><span class="pre">topology_gated_custom_all_reduce_stages()</span></code> — engine overrides derived from
 the resolved TP topology at launch.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">entry_stage_admission_limit()</span></code> returns how many requests one entry stage
+replica admits at once when that stage owns admission, such as a UMM
+controller. The coordinator caps in-flight requests at this value times the
+entry process replicas, or at the running+queued capacity of an engine stage
+when that is lower, since the entry stage may send any request to any engine
+stage. <code class="docutils literal notranslate"><span class="pre">None</span></code> (the default) derives the cap from the generation engine.</p></li>
 </ul>
 <p>Derived values are computed from stages, not manually maintained:
 <code class="docutils literal notranslate"><span class="pre">resolved_entry_stage</span></code>, <code class="docutils literal notranslate"><span class="pre">terminal_stages</span></code>, <code class="docutils literal notranslate"><span class="pre">gpu_placement</span></code>.</p>
