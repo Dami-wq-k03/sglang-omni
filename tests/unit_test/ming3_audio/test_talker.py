@@ -7,13 +7,15 @@ from transformers import Qwen2Config
 
 from sglang_omni.models.ming3_audio.talker import Ming3Talker, TalkerConfig
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="Acoustic CUDA graph tests require CUDA"
-)
+pytestmark = pytest.mark.accelerator
 
 
 @pytest.fixture
 def talker() -> Ming3Talker:
+    if not torch.cuda.is_available():
+        pytest.skip("Acoustic CUDA graph tests require CUDA")
+    else:
+        pass
     torch.manual_seed(42)
     acoustic_config = TalkerConfig(
         aggregator={
