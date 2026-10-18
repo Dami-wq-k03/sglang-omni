@@ -9,11 +9,10 @@ turns the latents into a 44.1 kHz waveform.
 ## Run locally
 
 The default placement uses one GPU. Preprocessing runs on the CPU. The backbone
-and the VAE decoder share GPU 0.
+and the VAE decoder share that GPU.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 sgl-omni serve \
-  --model-path inclusionAI/Ming-3.0-tts-tiny --host 127.0.0.1 --port 8011
+sgl-omni serve --model-path inclusionAI/Ming-3.0-tts-tiny
 ```
 
 Synthesize with a reference voice:
@@ -26,7 +25,7 @@ import requests
 
 reference = base64.b64encode(Path("reference.wav").read_bytes()).decode()
 response = requests.post(
-    "http://127.0.0.1:8011/v1/audio/speech",
+    "http://127.0.0.1:8000/v1/audio/speech",
     json={
         "model": "inclusionAI/Ming-3.0-tts-tiny",
         "input": "Get the trust fund to the bank early.",
@@ -72,7 +71,7 @@ entry's reference. Every output was closer to its own reference.
 ```bash
 python -m pytest tests/unit_test/ming3_tts -q
 python -m benchmarks.eval.benchmark_tts_seedtts --use-existing-server \
-  --port 8011 --model inclusionAI/Ming-3.0-tts-tiny --lang en --seed 123 \
+  --port 8000 --model inclusionAI/Ming-3.0-tts-tiny --lang en --seed 123 \
   --concurrency 16 --warmup 2 --generate-only --output-dir results/ming3_tts
 python -m benchmarks.eval.benchmark_tts_seedtts --transcribe-only --lang en \
   --model inclusionAI/Ming-3.0-tts-tiny --port 8092 --output-dir results/ming3_tts
