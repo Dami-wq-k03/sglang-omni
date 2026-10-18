@@ -6,13 +6,14 @@ encoder, a tensor-parallel Ling V3 thinker, and a continuous-latent speech decod
 
 ## Run locally
 
-Use a local checkpoint directory containing the thinker shards and the complete
-`talker/` directory. The default placement requires two GPUs: the thinker uses
-TP 2, the audio encoder runs on GPU 0, and speech synthesis runs on GPU 1.
+The checkpoint contains the thinker shards and the complete `talker/` directory.
+The default placement requires two GPUs: the thinker uses TP 2, the audio
+encoder runs on GPU 0, and speech synthesis runs on GPU 1.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 sgl-omni serve \
-  --model-path "$MODEL_PATH" --host 127.0.0.1 --port 8091
+export CUDA_VISIBLE_DEVICES=0,1
+
+sgl-omni serve --model-path inclusionAI/Ming-3.0-audio-flash
 ```
 
 The validated runtime uses Transformers 5.12.1 and SGLang 0.5.20 source revision
@@ -23,7 +24,7 @@ when reproducing these results.
 Transcribe a recording:
 
 ```bash
-curl http://127.0.0.1:8091/v1/audio/transcriptions \
+curl http://127.0.0.1:8000/v1/audio/transcriptions \
   -F model=inclusionAI/Ming-3.0-audio-flash \
   -F file=@input.wav -F temperature=0
 ```
@@ -43,7 +44,7 @@ import requests
 
 reference = base64.b64encode(Path("reference.wav").read_bytes()).decode()
 response = requests.post(
-    "http://127.0.0.1:8091/v1/audio/speech",
+    "http://127.0.0.1:8000/v1/audio/speech",
     json={
         "model": "inclusionAI/Ming-3.0-audio-flash",
         "input": "Get the trust fund to the bank early.",
@@ -92,7 +93,7 @@ commits.
 ```bash
 python -m pytest tests/unit_test/ming3_audio -q
 python -m benchmarks.eval.benchmark_asr_seedtts \
-  --port 8091 --model-path inclusionAI/Ming-3.0-audio-flash \
+  --port 8000 --model-path inclusionAI/Ming-3.0-audio-flash \
   --model-revision 354b5d98e2de85e4092575c92e699eda5fa78ab9 \
   --dataset-revision 27f4c1adee83b5b29b7c4b375f6b976324bda308 \
   --lang en --concurrencies 4 --repeats 1 --warmup \
