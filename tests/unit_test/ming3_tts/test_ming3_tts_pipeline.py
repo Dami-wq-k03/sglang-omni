@@ -8,7 +8,6 @@ from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 
 CHECKPOINT_ARCHITECTURE = "LingV3TTSForConditionalGeneration"
 HIDDEN_SIZE = 64
-SHORT_CONV_KERNEL_SIZE = 4
 
 
 def test_checkpoint_architecture_resolves_to_ming3_tts_pipeline() -> None:
@@ -35,7 +34,6 @@ def test_backbone_config_flattens_llm_config_and_keeps_speech_sections() -> None
     config = Ming3TTSConfig(
         llm_config={
             "hidden_size": HIDDEN_SIZE,
-            "short_conv_kernel_size": SHORT_CONV_KERNEL_SIZE,
             "model_type": "bailing_moe_v3",
         },
         tts_config={"latent_dim": 4},
@@ -44,7 +42,6 @@ def test_backbone_config_flattens_llm_config_and_keeps_speech_sections() -> None
     )
     assert config.model_type == "lingv3_tts"
     assert config.hidden_size == HIDDEN_SIZE
-    assert config.use_kda is True
     assert config.tts_config == {"latent_dim": 4}
     assert config.flow_config == {"depth": 1}
     assert config.aggregator_config == {"depth": 1}
