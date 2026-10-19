@@ -719,12 +719,56 @@ def test_turn_based_trace_and_hand_calculated_metrics() -> None:
     assert metrics["responses_interrupted"] == 1
 
 
-@pytest.mark.parametrize("supports_truncate", [True, False])
-def test_supports_truncate_is_not_pinned(supports_truncate: bool) -> None:
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("supports_truncate", True),
+        ("supports_truncate", False),
+        ("client_commit", True),
+        ("client_commit", False),
+        ("turn_control", ["server_vad"]),
+        ("turn_control", ["server_vad", None]),
+    ],
+)
+def test_deployment_grants_beyond_server_vad_turns_pass(
+    name: str, value: JsonValue
+) -> None:
     trace = turn_based_trace()
     session = find_event(trace, "session.updated")["session"]
-    session["sglang"]["granted"]["supports_truncate"] = supports_truncate
-    assert evaluate_trace(trace, profile=TURN_BASED)["status"] == "pass"
+    session["sglang"]["granted"][name] = value
+    assert evaluate_trace(trace, profile=TURN_BASED)["violations"] == []
+
+
+def with_progress(response_id: str) -> list[dict[str, JsonValue]]:
+    """The turn-based trace with an alignment progress report after the first
+    response.created."""
+    trace = turn_based_trace()
+    created = next(
+        index
+        for index, record in enumerate(trace)
+        if record["direction"] == "receive"
+        and record["event"]["type"] == "response.created"
+    )
+    progress = {
+        "type": "sglang.response.progress",
+        "event_id": "evt_progress",
+        "response_id": response_id,
+        "item_id": "item_0",
+        "output_index": 0,
+        "content_index": 0,
+        "text_end": 5,
+        "audio_ms": 200.0,
+    }
+    record = {**trace[created], "event": progress}
+    return [*trace[: created + 1], record, *trace[created + 1 :]]
+
+
+def test_progress_reports_must_name_a_created_response() -> None:
+    first = receive_events(turn_based_trace(), "response.created")[0]
+    known = with_progress(first["response"]["id"])
+    assert evaluate_trace(known, profile=TURN_BASED)["violations"] == []
+    unknown = evaluate_trace(with_progress("resp_missing"), profile=TURN_BASED)
+    assert unknown["violations"] == ["sglang.response.progress: unknown response"]
 
 
 def granted_with(name: str, value: JsonValue) -> Callable[[list], None]:
@@ -770,6 +814,10 @@ def echo_type(echoed: str) -> Callable[[list], None]:
         ),
         (granted_with("tail_policy", "pad"), "unsupported capability: tail_policy"),
         (granted_with("turn_control", [None]), "unsupported capability: turn_control"),
+        (
+            granted_with("client_commit", "yes"),
+            "unsupported capability: client_commit",
+        ),
         (granted_with("native_unit_ms", 80), "unsupported capability: native_unit_ms"),
         (
             granted_with("output_audio_format", {"type": "audio/pcm", "rate": 22050}),

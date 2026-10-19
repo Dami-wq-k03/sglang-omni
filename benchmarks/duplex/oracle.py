@@ -69,18 +69,19 @@ TERMINAL_REASONS = {
 }
 
 # note (luojiaxuan): A turn-based server takes turns by server VAD and flushes the
-# partial last unit; whether it truncates a cancelled reply depends on the
-# deployment, so supports_truncate is not required either way.
+# partial last unit; whether it truncates a cancelled reply, accepts client
+# commits or also offers client turn control depends on the deployment, so those
+# grants are checked only for what the recorder uses: server_vad turns.
+TURN_BASED_DEPLOYMENT_GRANTS = ("supports_truncate", "client_commit")
 TURN_BASED_CAPABILITIES = {
     **{
         name: value
         for name, value in REQUIRED_CAPABILITIES.items()
-        if name != "supports_truncate"
+        if name not in TURN_BASED_DEPLOYMENT_GRANTS
     },
     "interaction": "turn_based",
     "native_full_duplex": False,
     "tail_policy": "flush",
-    "turn_control": ["server_vad"],
 }
 TURN_BASED_TERMINALS = {("completed", "stop"), ("completed", "empty_turn")}
 TURN_BASED_INTERRUPTED_TERMINAL = ("cancelled", "interrupted")
@@ -325,6 +326,20 @@ def evaluate_trace(
                             == required_value,
                             f"unsupported capability: {capability_name}",
                         )
+                    if turn_based:
+                        for capability_name in TURN_BASED_DEPLOYMENT_GRANTS:
+                            check(
+                                type(granted_capabilities.get(capability_name)) is bool,
+                                f"unsupported capability: {capability_name}",
+                            )
+                        turn_control = granted_capabilities.get("turn_control")
+                        check(
+                            isinstance(turn_control, list)
+                            and "server_vad" in turn_control,
+                            "unsupported capability: turn_control",
+                        )
+                    else:
+                        pass
                     modalities = granted_capabilities.get("output_modalities")
                     check(
                         isinstance(modalities, list)
@@ -428,6 +443,13 @@ def evaluate_trace(
                         "invalid created response status",
                     )
                     response_states[event.response.id] = ResponseState()
+            elif turn_based and event_type == "sglang.response.progress":
+                # note (luojiaxuan): a server with an alignment node reports how far
+                # a reply's delivered audio covers its text; it changes no state.
+                check(
+                    event.response_id in response_states,
+                    f"{event_type}: unknown response",
+                )
             elif event_type.startswith("response."):
                 close_requests = counts["send", "session.close"]
                 check(
