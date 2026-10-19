@@ -212,25 +212,23 @@ def render_listening(repeat_dirs: list[Path]) -> list[str]:
     else:
         pass
     (floor_s,) = floors
-    lines = [
-        "",
-        "## Listening quality",
-        "",
+    intro = (
         "Per reply: the audio deltas of one response back to back, as a client "
-        "with enough buffer plays them. Omission rate (lower is better) is the "
-        "words of the response.done transcript missing from the reply's Parakeet "
-        "text, over the transcript's words, pooled over completed replies; WER "
-        "(lower is better) counts substitutions, deletions and insertions the "
-        "same way. Both include Parakeet's own errors, so they compare systems "
-        "rather than read as absolute rates. UTMOS (1-5, higher is better) "
-        f"scores replies of at least {floor_s:g} s; Short replies counts the "
-        "shorter ones, which get no UTMOS or voice score. Voice similarity "
-        "(higher is better) is 100 times the cosine of the WavLM speaker "
-        f"embedding of a reply's middle {floor_s:g} s with the mean embedding of "
-        "the same window of the repeat's other replies. p10 is the 10th "
-        "percentile over replies. Numeric cells are mean ± sample standard "
-        "deviation across repeats where values exist; counts are a value or range.",
-    ]
+        "with enough buffer plays them, up to a barge-in cut. Omission rate "
+        "(lower is better) is the words of the response.done transcript missing "
+        "from the reply's Parakeet text, over the transcript's words, pooled over "
+        "completed replies; WER (lower is better) counts substitutions, deletions "
+        "and insertions the same way. Both include Parakeet's own errors, so they "
+        "compare systems rather than read as absolute rates. UTMOS (1-5, higher "
+        f"is better) scores replies of at least {floor_s:g} s; Short replies "
+        "counts the shorter ones, which get no UTMOS or voice score. Voice "
+        "similarity (higher is better) is 100 times the cosine of the WavLM "
+        f"speaker embedding of a reply's middle {floor_s:g} s with the mean "
+        "embedding of the same window of the repeat's other replies. p10 is the "
+        "10th percentile over replies. Numeric cells are mean ± sample standard "
+        "deviation across repeats where values exist; counts are a value or range."
+    )
+    lines = ["", "## Listening quality", "", intro]
     for dataset, categories in (("v1.5", CATEGORIES), ("v1.0", V10_SUBSETS)):
         per_repeat = [listening_metrics(summary, dataset) for summary in summaries]
         if any(per_repeat):
