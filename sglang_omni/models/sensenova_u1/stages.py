@@ -1,28 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SenseNova-U1 native image-generation stage."""
+"""Configure and construct SenseNova image-generation schedulers."""
 
 from __future__ import annotations
 
-import base64
-import binascii
-import io
 import logging
 import time
 from contextlib import nullcontext
+from typing import Literal
 
 import torch
-from PIL import Image
-from pydantic import JsonValue
-from transformers import AutoModel, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoModel, AutoTokenizer
 
 from sglang_omni.models.sensenova_u1.cache_dit import SenseNovaCacheDit
+from sglang_omni.models.sensenova_u1.generation import (
+    generate_image,
+    generate_images,
+    prepare_cache_dit,
+    text_to_image_options,
+    unmount_cache_dit_after_failure,
+)
+from sglang_omni.models.sensenova_u1.image_processing import (
+    decode_reference_images,
+    prepare_reference_images,
+    resolve_edit_output_size,
+)
 from sglang_omni.models.sensenova_u1.neo_unify import register
 from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_chat import NEOChatModel
 from sglang_omni.models.sensenova_u1.neo_unify.modeling_qwen3 import (
     npu_fia_available,
     npu_swiglu_available,
 )
-from sglang_omni.models.sensenova_u1.neo_unify.utils import smart_resize
 from sglang_omni.models.sensenova_u1.offload import (
     LayerwiseOffloadConfig,
     SenseNovaLayerwiseOffload,
@@ -40,408 +47,25 @@ from sglang_omni.models.sensenova_u1.tensor_parallel import (
     validate_tp_device,
     validate_tp_settings,
 )
-from sglang_omni.models.sensenova_u1.usage import build_image_usage
 from sglang_omni.models.weight_loader import resolve_dtype
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
 from sglang_omni.utils.device import resolve_concrete_device
 
+__all__ = [
+    "create_generation_executor",
+    "decode_reference_images",
+    "generate_image",
+    "generate_images",
+    "image_generation_batch_key",
+    "image_generation_request_cost",
+    "prepare_cache_dit",
+    "unmount_cache_dit_after_failure",
+    "validate_generation_request",
+]
+
 logger = logging.getLogger(__name__)
-
-DEFAULT_INPUT_MAX_PIXELS = 2048 * 2048
-MIN_INPUT_MAX_PIXELS = 512 * 512
-
-
-def generate_image(
-    payload: StagePayload, model: NEOChatModel, tokenizer: PreTrainedTokenizerBase
-) -> StagePayload:
-    """Run the source model's native T2I or I2I path and return a PNG payload."""
-    inputs = payload.request.inputs
-    try:
-        if isinstance(inputs, dict) and inputs.get("task") == "image_edit":
-            return _generate_image_edit(payload, model, tokenizer)
-        else:
-            pass
-        result = _generate_text_to_image(payload, model, tokenizer)
-        result.data["image_usage"] = build_image_usage(
-            payload.request.inputs, tokenizer
-        )
-        return result
-    except Exception:
-        unmount_cache_dit_after_failure(model)
-        raise
-
-
-def generate_images(
-    payloads: list[StagePayload],
-    model: NEOChatModel,
-    tokenizer: PreTrainedTokenizerBase,
-) -> list[StagePayload]:
-    """Batch compatible T2I requests while preserving request order."""
-    if not payloads:
-        return []
-    else:
-        pass
-
-    results: list[StagePayload | None] = [None] * len(payloads)
-    groups: dict[
-        tuple[int, int, int, float, bool | None, str], list[tuple[int, StagePayload]]
-    ] = {}
-    for index, payload in enumerate(payloads):
-        inputs = payload.request.inputs
-        if isinstance(inputs, dict) and inputs.get("task") == "image_edit":
-            try:
-                results[index] = _generate_image_edit(payload, model, tokenizer)
-            except Exception:
-                unmount_cache_dit_after_failure(model)
-                raise
-            continue
-        else:
-            pass
-        options = _text_to_image_options(payload)
-        if options.n > 1:
-            results[index] = _generate_text_to_image(payload, model, tokenizer)
-            continue
-        else:
-            pass
-        signature = (
-            options.width,
-            options.height,
-            options.num_inference_steps,
-            options.guidance_scale,
-            options.enable_cache_dit,
-            cache_dit_batch_key(options.cache_dit_params),
-        )
-        groups.setdefault(signature, []).append((index, payload))
-
-    for indexed_payloads in groups.values():
-        indexes, compatible_payloads = zip(*indexed_payloads)
-        try:
-            if len(compatible_payloads) == 1:
-                batch_results = [
-                    _generate_text_to_image(compatible_payloads[0], model, tokenizer)
-                ]
-            else:
-                batch_results = _generate_text_to_image_batch(
-                    list(compatible_payloads), model, tokenizer
-                )
-        except Exception:
-            unmount_cache_dit_after_failure(model)
-            raise
-        for index, result in zip(indexes, batch_results):
-            results[index] = result
-
-    if any(result is None for result in results):
-        raise RuntimeError("SenseNova-U1 failed to produce every batched result")
-    else:
-        pass
-    for result in results:
-        if "image_usage" not in result.data:
-            result.data["image_usage"] = build_image_usage(
-                result.request.inputs, tokenizer
-            )
-        else:
-            pass
-    return [result for result in results if result is not None]
-
-
-def _text_to_image_options(payload: StagePayload) -> SenseNovaU1Sampling:
-    prompt = payload.request.inputs
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("SenseNova-U1 requires a non-empty text prompt")
-    else:
-        pass
-    return SenseNovaU1Sampling.from_params(payload.request.params)
-
-
-def _generate_text_to_image(
-    payload: StagePayload, model: NEOChatModel, tokenizer: PreTrainedTokenizerBase
-) -> StagePayload:
-    prompt = payload.request.inputs
-    options = _text_to_image_options(payload)
-    prepare_cache_dit(
-        model,
-        enable_cache_dit=options.enable_cache_dit,
-        params=options.cache_dit_params,
-        steps=options.num_inference_steps,
-        cfg_scale=options.guidance_scale,
-    )
-    with torch.inference_mode():
-        images = model.t2i_generate(
-            tokenizer,
-            prompt,
-            batch_size=options.n,
-            thinking_backend=None,
-            seed=(
-                options.seed
-                if options.n == 1
-                else [options.seed + index for index in range(options.n)]
-            ),
-            image_size=(options.width, options.height),
-            cfg_scale=options.guidance_scale,
-            cfg_norm="none",
-            timestep_shift=3.0,
-            enable_timestep_shift=True,
-            cfg_interval=(0.0, 1.0),
-            num_steps=options.num_inference_steps,
-            t_eps=0.02,
-            think_mode=False,
-        )
-    if options.n == 1:
-        return _encode_image(payload, images, options.width, options.height)
-    else:
-        pass
-    if not isinstance(images, torch.Tensor) or images.shape != (
-        options.n,
-        3,
-        options.height,
-        options.width,
-    ):
-        raise ValueError("SenseNova-U1 returned an invalid multi-output image tensor")
-    else:
-        pass
-    encoded = []
-    for index in range(options.n):
-        _encode_image(payload, images[index : index + 1], options.width, options.height)
-        encoded.append(payload.data["image_b64"])
-    payload.data = {
-        "images_b64": encoded,
-        "modality": "image",
-        "finish_reason": "stop",
-    }
-    return payload
-
-
-def _generate_text_to_image_batch(
-    payloads: list[StagePayload],
-    model: NEOChatModel,
-    tokenizer: PreTrainedTokenizerBase,
-) -> list[StagePayload]:
-    if not payloads:
-        return []
-    else:
-        pass
-    prompts = [payload.request.inputs for payload in payloads]
-    options = [_text_to_image_options(payload) for payload in payloads]
-    first = options[0]
-    signature = (
-        first.width,
-        first.height,
-        first.num_inference_steps,
-        first.guidance_scale,
-        first.enable_cache_dit,
-        cache_dit_batch_key(first.cache_dit_params),
-    )
-    if any(
-        (
-            item.width,
-            item.height,
-            item.num_inference_steps,
-            item.guidance_scale,
-            item.enable_cache_dit,
-            cache_dit_batch_key(item.cache_dit_params),
-        )
-        != signature
-        for item in options[1:]
-    ):
-        raise ValueError("SenseNova-U1 can only batch compatible T2I requests")
-    else:
-        pass
-
-    prepare_cache_dit(
-        model,
-        enable_cache_dit=first.enable_cache_dit,
-        params=first.cache_dit_params,
-        steps=first.num_inference_steps,
-        cfg_scale=first.guidance_scale,
-    )
-
-    logger.info(
-        f"SenseNova-U1 T2I batch: size={len(payloads)}, "
-        f"image_size={first.width}x{first.height}, "
-        f"steps={first.num_inference_steps}, cfg={first.guidance_scale}"
-    )
-    with torch.inference_mode():
-        images = model.t2i_generate(
-            tokenizer,
-            prompts,
-            batch_size=len(payloads),
-            thinking_backend=None,
-            seed=[item.seed for item in options],
-            image_size=(first.width, first.height),
-            cfg_scale=first.guidance_scale,
-            cfg_norm="none",
-            timestep_shift=3.0,
-            enable_timestep_shift=True,
-            cfg_interval=(0.0, 1.0),
-            num_steps=first.num_inference_steps,
-            t_eps=0.02,
-            think_mode=False,
-        )
-    return _encode_images(payloads, images, first.width, first.height)
-
-
-def _generate_image_edit(
-    payload: StagePayload, model: NEOChatModel, tokenizer: PreTrainedTokenizerBase
-) -> StagePayload:
-    inputs = payload.request.inputs
-    prompt = inputs.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("SenseNova-U1 requires a non-empty image edit prompt")
-    else:
-        pass
-    options = SenseNovaU1ImageEditSampling.from_params(payload.request.params)
-    references = _prepare_reference_images(inputs.get("image_b64"), options)
-    token_usage = {}
-    width, height = _resolve_edit_output_size(references, options)
-    prepare_cache_dit(
-        model,
-        enable_cache_dit=options.enable_cache_dit,
-        params=options.cache_dit_params,
-        steps=options.num_inference_steps,
-        cfg_scale=options.guidance_scale,
-        img_cfg_scale=options.img_cfg_scale,
-        is_edit=True,
-    )
-    with torch.inference_mode():
-        images = model.it2i_generate(
-            tokenizer,
-            prompt,
-            references,
-            usage=token_usage,
-            batch_size=1,
-            seed=options.seed,
-            image_size=(width, height),
-            cfg_scale=options.guidance_scale,
-            img_cfg_scale=options.img_cfg_scale,
-            cfg_norm="none",
-            timestep_shift=3.0,
-            enable_timestep_shift=True,
-            cfg_interval=(0.0, 1.0),
-            num_steps=options.num_inference_steps,
-            t_eps=0.02,
-            think_mode=False,
-        )
-    result = _encode_image(payload, images, width, height)
-    result.data["image_usage"] = build_image_usage(
-        prompt, tokenizer, token_usage.get("image_tokens", 0)
-    )
-    return result
-
-
-def decode_reference_images(value: str | list[str] | None) -> list[Image.Image]:
-    values = value if isinstance(value, list) else [value]
-    if not values or any(not isinstance(item, str) or not item for item in values):
-        raise ValueError("SenseNova-U1 requires at least one reference image")
-    else:
-        pass
-    images: list[Image.Image] = []
-    for item in values:
-        try:
-            image_bytes = base64.b64decode(item, validate=True)
-            image = Image.open(io.BytesIO(image_bytes))
-            image.load()
-        except (binascii.Error, OSError, ValueError) as exc:
-            raise ValueError(
-                "SenseNova-U1 received an invalid reference image"
-            ) from exc
-        images.append(image)
-    return images
-
-
-def _auto_input_max_pixels(num_images: int) -> int:
-    if num_images <= 0:
-        raise ValueError("SenseNova-U1 requires at least one reference image")
-    else:
-        pass
-    if num_images <= 2:
-        return DEFAULT_INPUT_MAX_PIXELS
-    else:
-        pass
-    return max(MIN_INPUT_MAX_PIXELS, 2 * DEFAULT_INPUT_MAX_PIXELS // num_images)
-
-
-def _prepare_reference_images(
-    value: str | list[str] | None, options: SenseNovaU1ImageEditSampling
-) -> list[Image.Image]:
-    images = decode_reference_images(value)
-    input_max_pixels = options.input_max_pixels or _auto_input_max_pixels(len(images))
-    prepared = []
-    for image in images:
-        if image.mode == "RGBA":
-            background = Image.new("RGB", image.size, (255, 255, 255))
-            background.paste(image, mask=image.split()[3])
-            image = background
-        else:
-            image = image.convert("RGB")
-        if options.do_resize:
-            height, width = smart_resize(
-                height=image.height,
-                width=image.width,
-                factor=32,
-                min_pixels=input_max_pixels,
-                max_pixels=input_max_pixels,
-            )
-            if image.size != (width, height):
-                image = image.resize((width, height), Image.Resampling.LANCZOS)
-            else:
-                pass
-        else:
-            pass
-        prepared.append(image)
-    return prepared
-
-
-def _resolve_edit_output_size(
-    references: list[Image.Image], options: SenseNovaU1ImageEditSampling
-) -> tuple[int, int]:
-    if options.size_explicit:
-        return options.width, options.height
-    else:
-        pass
-    target_pixels = options.width * options.height
-    height, width = smart_resize(
-        height=references[0].height,
-        width=references[0].width,
-        factor=32,
-        min_pixels=target_pixels,
-        max_pixels=target_pixels,
-    )
-    return width, height
-
-
-def _encode_image(
-    payload: StagePayload, images: torch.Tensor, width: int, height: int
-) -> StagePayload:
-    if not isinstance(images, torch.Tensor) or images.shape != (1, 3, height, width):
-        raise ValueError("SenseNova-U1 returned an invalid image tensor")
-    else:
-        pass
-    image = ((images[0].float() + 1.0) * 127.5).clamp(0, 255)
-    image = image.permute(1, 2, 0).byte().cpu().numpy()
-    buffer = io.BytesIO()
-    Image.fromarray(image, mode="RGB").save(buffer, format="PNG")
-    payload.data = {
-        "image_b64": base64.b64encode(buffer.getvalue()).decode("ascii"),
-        "modality": "image",
-        "finish_reason": "stop",
-    }
-    return payload
-
-
-def _encode_images(
-    payloads: list[StagePayload], images: torch.Tensor, width: int, height: int
-) -> list[StagePayload]:
-    expected_shape = (len(payloads), 3, height, width)
-    if not isinstance(images, torch.Tensor) or images.shape != expected_shape:
-        raise ValueError("SenseNova-U1 returned an invalid batched image tensor")
-    else:
-        pass
-    return [
-        _encode_image(payload, images[index : index + 1], width, height)
-        for index, payload in enumerate(payloads)
-    ]
 
 
 def image_generation_request_cost(payload: StagePayload) -> int:
@@ -451,7 +75,7 @@ def image_generation_request_cost(payload: StagePayload) -> int:
         options = SenseNovaU1ImageEditSampling.from_params(payload.request.params)
         branches = 1 + int(options.guidance_scale > 1) + int(options.img_cfg_scale > 1)
     else:
-        options = _text_to_image_options(payload)
+        options = text_to_image_options(payload)
         branches = 1 + int(options.guidance_scale > 1)
     outputs = options.n if isinstance(options, SenseNovaU1Sampling) else 1
     return (
@@ -465,14 +89,17 @@ def image_generation_request_cost(payload: StagePayload) -> int:
 
 def image_generation_batch_key(
     payload: StagePayload,
-) -> tuple[str, str] | tuple[str, int, int, int, float, bool | None, str]:
+) -> (
+    tuple[Literal["image_edit", "text_to_image_multi_output"], str]
+    | tuple[Literal["text_to_image"], int, int, int, float, bool | None, str]
+):
     """Return a compatibility key; I2I requests always remain single-item."""
     inputs = payload.request.inputs
     if isinstance(inputs, dict) and inputs.get("task") == "image_edit":
         return ("image_edit", payload.request_id)
     else:
         pass
-    options = _text_to_image_options(payload)
+    options = text_to_image_options(payload)
     if options.n > 1:
         return ("text_to_image_multi_output", payload.request_id)
     else:
@@ -488,49 +115,6 @@ def image_generation_batch_key(
     )
 
 
-def unmount_cache_dit_after_failure(model: NEOChatModel) -> None:
-    controller = model.__dict__.get("sensenova_cache_dit")
-    if isinstance(controller, SenseNovaCacheDit):
-        try:
-            controller.unmount()
-        except Exception:
-            logger.exception(
-                "Cache-DiT cleanup failed; the controller retained recovery state"
-            )
-    else:
-        pass
-
-
-def prepare_cache_dit(
-    model: NEOChatModel,
-    *,
-    enable_cache_dit: bool | None,
-    params: JsonValue,
-    steps: int,
-    cfg_scale: float,
-    img_cfg_scale: float = 1.0,
-    is_edit: bool = False,
-) -> None:
-    # note (Codex): Direct generation calls may bypass the factory controller.
-    controller = model.__dict__.get("sensenova_cache_dit")
-    if not isinstance(controller, SenseNovaCacheDit):
-        return
-    else:
-        pass
-    if not is_edit:
-        branch_count = 2 if cfg_scale > 1 else 1
-    else:
-        branch_count = image_guidance_branch_count(cfg_scale, img_cfg_scale)
-    controller.prepare(
-        model.language_model.model,
-        enabled=enable_cache_dit,
-        params=params,
-        steps=steps,
-        branch_count=branch_count,
-        cfg_interval=(0.0, 1.0),
-    )
-
-
 def validate_generation_request(payload: StagePayload, model: NEOChatModel) -> None:
     """Reject invalid TP work before the leader dispatches it to other ranks."""
     inputs = payload.request.inputs
@@ -542,13 +126,13 @@ def validate_generation_request(payload: StagePayload, model: NEOChatModel) -> N
         else:
             pass
         options = SenseNovaU1ImageEditSampling.from_params(payload.request.params)
-        references = _prepare_reference_images(inputs.get("image_b64"), options)
-        _resolve_edit_output_size(references, options)
+        references = prepare_reference_images(inputs.get("image_b64"), options)
+        resolve_edit_output_size(references, options)
         branch_count = image_guidance_branch_count(
             options.guidance_scale, options.img_cfg_scale
         )
     else:
-        options = _text_to_image_options(payload)
+        options = text_to_image_options(payload)
         branch_count = 2 if options.guidance_scale > 1 else 1
     controller = model.sensenova_cache_dit
     enabled = (
@@ -574,17 +158,17 @@ def create_generation_executor(
     tp_rank: int = 0,
     tp_size: int = 1,
     nccl_port: int | None = None,
-    dtype: str | None = "bfloat16",
+    dtype: str | None,
     max_batch_size: int = 1,
     max_batch_wait_ms: float = 0,
     max_batch_cost: int | None = None,
     enable_cache_dit: bool,
     cache_dit_params: dict[str, int | float] | None = None,
-    dit_layerwise_offload: bool = False,
-    dit_offload_prefetch_size: int = 1,
-    dit_layerwise_resident_layers: int = 0,
-    dit_layerwise_residency_policy: str = "leading",
-    pin_cpu_memory: bool = False,
+    dit_layerwise_offload: bool,
+    dit_offload_prefetch_size: int,
+    dit_layerwise_resident_layers: int,
+    dit_layerwise_residency_policy: Literal["leading", "strided"],
+    pin_cpu_memory: bool,
 ) -> SimpleScheduler:
     """Load the model once and optionally batch compatible T2I requests."""
     validate_tp_settings(tp_rank, tp_size, max_batch_size)
@@ -608,7 +192,7 @@ def create_generation_executor(
     else:
         pass
 
-    load_started = time.perf_counter()
+    load_started_at_s = time.perf_counter()
     register()
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModel.from_pretrained(
@@ -635,7 +219,7 @@ def create_generation_executor(
     logger.info(
         f"SenseNova-U1 loaded on {resolved_device} with dtype={dtype}, "
         f"tp_rank={tp_rank}/{tp_size} "
-        f"in {time.perf_counter() - load_started:.2f} seconds"
+        f"in {time.perf_counter() - load_started_at_s:.2f} seconds"
     )
     if resolved_device.type == "npu":
         logger.info(

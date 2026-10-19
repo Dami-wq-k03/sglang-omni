@@ -8,9 +8,8 @@ import torch
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
+from sglang_omni.models.sensenova_u1.generation import generate_image, generate_images
 from sglang_omni.models.sensenova_u1.stages import (
-    generate_image,
-    generate_images,
     image_generation_batch_key,
     image_generation_request_cost,
 )

@@ -27,6 +27,7 @@ from typing import Any
 
 from sglang_omni.config.schema import (
     PLACEMENT_OWNED_FACTORY_KWARGS,
+    FactoryDefault,
     PipelineConfig,
     StageConfig,
     parse_replica_instance_name,
@@ -46,10 +47,16 @@ def resolve_stage_factory_kwargs(
     stage_cfg: StageConfig,
     global_cfg: PipelineConfig,
 ) -> dict[str, Any]:
-    """Return the pipeline author's constructor kwargs for one stage."""
+    """Apply declared fallbacks before the pipeline author's constructor kwargs."""
 
     logical_stage_name, _ = parse_replica_instance_name(stage_cfg.name)
-    kwargs = dict(global_cfg.stage_factory_kwargs(logical_stage_name) or {})
+    kwargs = {
+        name: metadata.value
+        for name, field in type(stage_cfg.factory).model_fields.items()
+        for metadata in field.metadata
+        if isinstance(metadata, FactoryDefault)
+    }
+    kwargs.update(global_cfg.stage_factory_kwargs(logical_stage_name) or {})
     reserved = _PLACEMENT_OWNED_KWARGS & kwargs.keys()
     if reserved:
         raise ValueError(
@@ -57,6 +64,8 @@ def resolve_stage_factory_kwargs(
             f"{sorted(reserved)}; these kwargs are owned by placement and are "
             "injected from stage.gpu_memory_fraction and stage.gpu"
         )
+    else:
+        pass
     return kwargs
 
 

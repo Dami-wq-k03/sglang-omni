@@ -3,21 +3,38 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import Field
 
-from sglang_omni.config import FactoryArgs, PipelineConfig, StageConfig
+from sglang_omni.config.schema import (
+    FactoryArgs,
+    FactoryDefault,
+    PipelineConfig,
+    StageConfig,
+)
+
+DEFAULT_GENERATION_DTYPE = "bfloat16"
+DEFAULT_LAYERWISE_OFFLOAD = False
 
 
 class SenseNovaGenerationFactoryArgs(FactoryArgs):
+    dtype: Annotated[str | None, FactoryDefault(value=DEFAULT_GENERATION_DTYPE)] = None
     enable_cache_dit: bool | None = None
     cache_dit_params: dict[str, int | float] | None = None
-    dit_layerwise_offload: bool | None = None
-    dit_offload_prefetch_size: int | None = Field(default=None, ge=0, strict=True)
-    dit_layerwise_resident_layers: int | None = Field(default=None, ge=0, strict=True)
-    dit_layerwise_residency_policy: Literal["leading", "strided"] | None = None
-    pin_cpu_memory: bool | None = None
+    dit_layerwise_offload: Annotated[
+        bool | None, FactoryDefault(value=DEFAULT_LAYERWISE_OFFLOAD)
+    ] = None
+    dit_offload_prefetch_size: Annotated[int | None, FactoryDefault(value=1)] = Field(
+        default=None, ge=0, strict=True
+    )
+    dit_layerwise_resident_layers: Annotated[int | None, FactoryDefault(value=0)] = (
+        Field(default=None, ge=0, strict=True)
+    )
+    dit_layerwise_residency_policy: Annotated[
+        Literal["leading", "strided"] | None, FactoryDefault(value="leading")
+    ] = None
+    pin_cpu_memory: Annotated[bool | None, FactoryDefault(value=False)] = None
 
 
 class SenseNovaGenerationStageConfig(StageConfig):
@@ -40,9 +57,9 @@ class SenseNovaU1PipelineConfig(PipelineConfig):
             process="sensenova_generate",
             factory_path="sglang_omni.models.sensenova_u1.stages.create_generation_executor",
             factory=SenseNovaGenerationFactoryArgs(
-                dtype="bfloat16",
+                dtype=DEFAULT_GENERATION_DTYPE,
+                dit_layerwise_offload=DEFAULT_LAYERWISE_OFFLOAD,
                 enable_cache_dit=False,
-                dit_layerwise_offload=False,
             ),
             gpu=0,
             terminal=True,

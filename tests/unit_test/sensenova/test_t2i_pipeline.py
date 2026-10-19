@@ -17,10 +17,9 @@ from sglang_omni.config import FactoryArgs, ProcessConfig
 from sglang_omni.config.manager import resolve_config_cls_for_model_path
 from sglang_omni.config.topology import compile_logical_processes
 from sglang_omni.models.sensenova_u1.config import SenseNovaU1PipelineConfig
+from sglang_omni.models.sensenova_u1.generation import generate_image, generate_images
 from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_chat import NEOChatModel
 from sglang_omni.models.sensenova_u1.stages import (
-    generate_image,
-    generate_images,
     image_generation_batch_key,
     image_generation_request_cost,
 )

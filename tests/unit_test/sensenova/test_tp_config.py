@@ -5,8 +5,15 @@ import pytest
 
 from sglang_omni.config import ProcessConfig
 from sglang_omni.config.manager import ConfigManager
+from sglang_omni.config.runtime import (
+    resolve_stage_factory_kwargs,
+    resolve_stage_typed_kwargs,
+)
 from sglang_omni.config.topology import compile_logical_processes
-from sglang_omni.models.sensenova_u1.config import SenseNovaU1PipelineConfig
+from sglang_omni.models.sensenova_u1.config import (
+    SenseNovaGenerationFactoryArgs,
+    SenseNovaU1PipelineConfig,
+)
 from sglang_omni.pipeline.replicas import expand_replica_stages
 
 
@@ -76,3 +83,72 @@ def test_dotted_cli_enables_tp_and_rejects_batching():
     assert config.stages[0].tp_size == 2
     with pytest.raises(ValueError, match="max_batch_size=1"):
         ConfigManager(config).merge_config([("generate.factory.max_batch_size", "2")])
+
+
+@pytest.mark.parametrize(
+    "dtype,offload,expected_dtype,expected_offload",
+    [(None, None, "bfloat16", False), ("float16", True, "float16", True)],
+)
+def test_generation_defaults_reach_factory(
+    dtype: str | None,
+    offload: bool | None,
+    expected_dtype: str,
+    expected_offload: bool,
+) -> None:
+    config = SenseNovaU1PipelineConfig(model_path="/model/sensenova")
+    stage = config.stages[0]
+    default_kwargs = {
+        **resolve_stage_factory_kwargs(stage, config),
+        **resolve_stage_typed_kwargs(stage),
+    }
+    assert default_kwargs["dtype"] == "bfloat16"
+    assert default_kwargs["dit_layerwise_offload"] is False
+    stage.factory = SenseNovaGenerationFactoryArgs(
+        dtype=dtype, dit_layerwise_offload=offload
+    )
+    factory_kwargs = {
+        **resolve_stage_factory_kwargs(stage, config),
+        **resolve_stage_typed_kwargs(stage),
+    }
+    assert factory_kwargs["dtype"] == expected_dtype
+    assert factory_kwargs["dit_layerwise_offload"] is expected_offload
+
+
+@pytest.mark.parametrize("use_none", [False, True])
+def test_offload_defaults_reach_factory(use_none: bool) -> None:
+    expected = {
+        "dit_offload_prefetch_size": 1,
+        "dit_layerwise_resident_layers": 0,
+        "dit_layerwise_residency_policy": "leading",
+        "pin_cpu_memory": False,
+    }
+    config = SenseNovaU1PipelineConfig(model_path="/model/sensenova")
+    stage = config.stages[0]
+    if use_none:
+        stage.factory = SenseNovaGenerationFactoryArgs.model_validate(
+            dict.fromkeys(expected)
+        )
+    else:
+        stage.factory = SenseNovaGenerationFactoryArgs()
+    resolved = {
+        **resolve_stage_factory_kwargs(stage, config),
+        **resolve_stage_typed_kwargs(stage),
+    }
+    assert {name: resolved[name] for name in expected} == expected
+
+
+def test_offload_overrides_reach_factory() -> None:
+    overrides = {
+        "dit_offload_prefetch_size": 2,
+        "dit_layerwise_resident_layers": 3,
+        "dit_layerwise_residency_policy": "strided",
+        "pin_cpu_memory": True,
+    }
+    config = SenseNovaU1PipelineConfig(model_path="/model/sensenova")
+    stage = config.stages[0]
+    stage.factory = SenseNovaGenerationFactoryArgs.model_validate(overrides)
+    resolved = {
+        **resolve_stage_factory_kwargs(stage, config),
+        **resolve_stage_typed_kwargs(stage),
+    }
+    assert {name: resolved[name] for name in overrides} == overrides

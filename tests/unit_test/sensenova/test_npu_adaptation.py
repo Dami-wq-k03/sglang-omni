@@ -487,6 +487,11 @@ def test_generation_executor_uses_resolved_npu_device(monkeypatch):
         max_batch_wait_ms=7,
         max_batch_cost=1234,
         enable_cache_dit=False,
+        dit_layerwise_offload=False,
+        dit_offload_prefetch_size=1,
+        dit_layerwise_resident_layers=0,
+        dit_layerwise_residency_policy="leading",
+        pin_cpu_memory=False,
     )
 
     assert scheduler._fn is not None

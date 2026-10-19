@@ -210,6 +210,13 @@ class EngineArgs(BaseModel):
         }
 
 
+@dataclass(frozen=True, kw_only=True)
+class FactoryDefault:
+    """Fallback used only when neither author kwargs nor typed config supplies a value."""
+
+    value: str | int | float | bool | None
+
+
 class FactoryArgs(BaseModel):
     """Constructor kwargs for one stage's factory.
 
