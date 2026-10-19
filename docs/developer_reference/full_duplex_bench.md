@@ -41,6 +41,17 @@ v1.5 has 498 pairs in four categories: `user_interruption` (200), `user_backchan
 - **Behavior labels**: the judge gives each pair one label for how the model handled the overlap. `C_RESPOND`: it addressed the overlap's content. `C_RESUME`: it ignored the overlap and continued. `C_UNCERTAIN_HANDLING`: it asked for a repeat or showed that it did not catch the overlap. `C_UNKNOWN`: its reply was off-target, or it said nothing. The share that should be high is `C_RESPOND` on `user_interruption` and `C_RESUME` in the other categories; `C_UNKNOWN` should be low.
 - **Semantic quality** (`JUDGE=qwen` only, not part of the paper): a label says what the model did, not whether that was right, so a `C_RESUME` that ignored a real interruption looks the same as one that correctly ignored a backchannel. The semantic judge grades each pair on three axes, each `accept`, `fail` or `unresolved`: `interaction_handling` (the overlap was handled correctly for its category), `relevance` (the reply addressed the request that mattered) and `grounding` (no unsupported facts, claimed actions or false memories). `joint` accepts only when all three accept. A verdict must quote the transcript it relies on, and a verdict with a missing or wrong quote becomes `unresolved`. Each cell reports `quality = A/(A+F)` and `coverage = (A+F)/N` over all N selected pairs; read the two together, since a high quality over a low coverage judges few pairs.
 
+### Listening quality
+
+The timing, label and semantic numbers say what the model did and when, not how its replies sound. `asr` also scores every reply of both datasets on its own, and `RESULTS.md` reports the scores per v1.5 category and per v1.0 subset, never as one total. A reply is the audio of one response, its deltas back to back as a client with enough buffer plays them; gaps from deltas that arrive late are left out, because the [serving metrics](#serving-metrics) measure them as underruns.
+
+- **Omission rate** (lower is better): the words of the transcript in `response.done` that are missing from the reply's Parakeet transcript, over the transcript's words, pooled over the completed replies of a category. Both texts go through Whisper's English normalizer before alignment. A cancelled reply is not compared: its transcript can run past the audio it played.
+- **WER** (lower is better): substitutions, deletions and insertions of the same alignment. A swallowed syllable often shows up as a substitution rather than a deletion. Both rates include Parakeet's own errors, so compare them between systems rather than read them as absolute rates.
+- **UTMOS** (1-5, higher is better): the UTMOS prediction of each reply, the model the TTS benchmarks use; it drops for clicks, distortion and unnatural prosody. The table shows the mean and the 10th percentile.
+- **Voice similarity** (higher is better): 100 times the cosine of a reply's WavLM speaker embedding with the mean embedding of every other reply in the repeat, so a reply whose voice drifts from the model's usual one scores low. The table shows the mean and the 10th percentile.
+
+These are reported only, with no pass mark yet. Very short replies, such as a backchannel, give noisier UTMOS and speaker embeddings; `listening/scores.json` keeps each reply's duration for a breakdown.
+
 ## Setup
 
 You need one GPU with at least 80 GB (H100 or H200), and `git`, `uv` and the FFmpeg shared libraries (version 4 to 8) on the host. Run every command in this page from the repository root, with the sglang-omni virtualenv active (`which python` should print its interpreter).
@@ -86,7 +97,7 @@ Without `--all-stages`, `generate` only records, and each later step is its own 
 | Step | Subcommand | What it does |
 |---|---|---|
 | 1 | `generate` | Starts the model server, streams the selected inputs to `/v1/realtime` (two sessions per v1.5 pair, one per v1.0 sample), records the model's audio, stops the server, then cuts a fixed observation window from each session |
-| 2 | `asr` | Transcribes the windows with word timestamps (Parakeet), computes v1.5 official speech intervals, then writes v1.0 unified metrics from the saved transcript and annotations on CPU |
+| 2 | `asr` | Transcribes the windows with word timestamps (Parakeet), computes v1.5 official speech intervals, writes v1.0 unified metrics from the saved transcript and annotations on CPU, then cuts every reply and scores its [listening quality](#listening-quality) |
 | 3 | `judge` | Runs the official v1.0 evaluator on the v1.0 subsets that need no LLM, then judges the v1.5 pairs and the v1.0 interruption subset (with `JUDGE=qwen` it starts the judge server for them and stops it after), and writes the per-repeat summaries |
 | | `aggregate` | Combines the repeats of a run into `RESULTS.md` |
 
@@ -188,6 +199,8 @@ The v1.0 unified section first shows per-repeat coverage and metric tables for p
 
 The following v1.0 official reference table has one row per selected subset. `Selected` counts the recorded samples, `Eligible` the ones the official evaluator can score, and `Evaluated` the ones it scored; then come `Takeover rate`, `Latency (s)`, `Relevance (0-5)`, `Judge retries`, `Backchannel frequency` and `Backchannel JSD`, with `n/a` where the subset's task does not report a number. A subset whose sessions all failed still has a row, with `Eligible 0`. A subset that a repeat has not evaluated is listed under the table as not evaluated yet (`judge` has not reached it) or failed (with its evaluator log); its cells average the repeats that did evaluate it, and show `n/a` when none did. A nonzero `Judge retries` means the interruption takeover rate is inflated (see [v1.0 scoring](#v10-scoring)).
 
+The listening-quality section comes last, with one table per dataset and the same mean ± deviation cells; see [Listening quality](#listening-quality) for what each column measures.
+
 Each repeat writes these files under `$FDB_WORK/runs/RUN_NAME/repeat-N/`:
 
 | Path | Content |
@@ -200,6 +213,7 @@ Each repeat writes these files under `$FDB_WORK/runs/RUN_NAME/repeat-N/`:
 | `judge-qwen/summary.json` | v1.5 behavior labels with `JUDGE=qwen` |
 | `semantic-qwen/` | Semantic judge: control comparison, the exact packets sent, raw responses, per-pair outcomes and `summary.json` |
 | `report.txt` | Readable v1.5 report: coverage, timing and semantic quality |
+| `listening/` | One 16 kHz WAV per reply in `wav/`, `replies.json` with each reply's status, transcript and Parakeet text, `scores.json` with each reply's scores, and the per-category `summary.json` with the checkpoint hashes |
 | `v10/reference/` | v1.0 windows (`<subset>/<id>/output.wav`), `manifest.json`, the ASR receipt `asr.json`, per-repeat `unified.json` and `unified-samples.jsonl`, official `summary.json`, the judge ledger in `judge/` and evaluator logs in `logs/` |
 
 With `JUDGE=qwen`, the "Official behavior label distribution" section of `report.txt` shows `0 / 0` and `not_prepared`, because that section counts GPT-4o labels only; the Qwen labels are in `judge-qwen/summary.json` and `RESULTS.md`.
@@ -368,6 +382,7 @@ The reported results came from one C1 and C2 screen, five C4 runs, two C8 runs, 
 | `WARNING: the v1.0 ASR failed` | `repeat-N/v10/reference/logs/asr.log` has the official script's output and the terminal has the traceback. A rerun of `asr` transcribes every v1.0 sample again |
 | `WARNING: v1.0 unified scoring failed` | ASR completed, but the saved export, transcript or annotation did not score. Fix the stated cause and run the CPU-only backfill command printed in the warning; it does not repeat ASR or v1.5 work. Rerun `aggregate` to refresh `RESULTS.md` |
 | `Unified metrics unavailable` in `RESULTS.md` | The report names a missing export/ASR file, missing output pair, stale hashes, unsupported version or incomplete subset. Repair the export or ASR if named, then use the per-repeat backfill command in the report and rerun `aggregate` |
+| `WARNING: the listening-quality phase failed` | The terminal has the traceback. `this capture cuts replies at barge-in` means the recording used a protocol whose replies stop at barge-in, which the listening metrics do not read yet. A `ModuleNotFoundError` for `s3prl` or `whisper` means the serving venv lacks the repository's dependencies; reinstall them. Rerun `asr`; it recomputes the listening metrics in full |
 | `WARNING: the v1.0 evaluation failed for ...` | The traceback is at the end of `repeat-N/v10/reference/logs/evaluate-<subset>.log`. A `ZeroDivisionError` in `candor_turn_taking` or `synthetic_user_interruption` means no selected sample took the turn, so select more samples in a new run. After fixing another cause, rerun `judge`; it evaluates the missing subsets again |
 | `judge request ... got no parsable rating in 3 attempts` | The v1.0 relevance judge answered without a rating; the ledger in `v10/reference/judge/` has each reply. The official parser needs `Analysis: <text>`, a line break, then `I would rate the AI's response as <digit>`. The attempts share a seed, so a local judge repeats the same reply and a rerun fails again |
 | `custom judge identity changed; use a new --out` | The judge config changed since this repeat was judged, for example after an SGLang upgrade. Delete `repeat-N/judge-qwen` and rerun `judge` |

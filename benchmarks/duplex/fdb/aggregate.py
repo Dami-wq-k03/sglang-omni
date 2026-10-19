@@ -9,6 +9,7 @@ from pathlib import Path
 
 from benchmarks.duplex.fdb.common import (
     ENGINE_LABEL,
+    LISTENING_DIR,
     V10_DIR,
     JudgeName,
     Settings,
@@ -68,6 +69,16 @@ V10_COLUMNS = (
     ("judge_retries", "Judge retries", "count"),
     ("frequency", "Backchannel frequency", "rate"),
     ("jsd", "Backchannel JSD", "divergence"),
+)
+LISTENING_COLUMNS = (
+    ("replies", "Replies", "count"),
+    ("compared_replies", "Compared replies", "count"),
+    ("omission_rate", "Omission rate", "percent"),
+    ("word_error_rate", "WER", "percent"),
+    ("utmos_mean", "UTMOS mean", "rating"),
+    ("utmos_p10", "UTMOS p10", "rating"),
+    ("voice_similarity_mean", "Voice similarity mean", "rating"),
+    ("voice_similarity_p10", "Voice similarity p10", "rating"),
 )
 RepeatMetrics = dict[str, dict[str, float | None]]
 
@@ -165,6 +176,56 @@ def v10_metrics(repeat_dir: Path) -> RepeatMetrics:
             pass
         metrics[subset] = row
     return metrics
+
+
+def listening_metrics(repeat_dir: Path, dataset: str) -> RepeatMetrics:
+    """One dataset's per-category listening pools; empty when the repeat has no
+    listening summary or did not select that dataset."""
+    summary_path = repeat_dir / LISTENING_DIR / "summary.json"
+    if not summary_path.is_file():
+        return {}
+    else:
+        pass
+    datasets = read_json(summary_path)["datasets"]
+    return datasets[dataset] if dataset in datasets else {}
+
+
+def render_listening(repeat_dirs: list[Path]) -> list[str]:
+    lines = []
+    for dataset, categories in (("v1.5", CATEGORIES), ("v1.0", V10_SUBSETS)):
+        per_repeat = [listening_metrics(path, dataset) for path in repeat_dirs]
+        if any(per_repeat):
+            note = coverage_note(dataset, repeat_dirs, per_repeat).strip()
+            lines += [
+                "",
+                f"### {dataset}",
+                *(["", note] if note else []),
+                "",
+                *render_table(per_repeat, LISTENING_COLUMNS, categories),
+            ]
+        else:
+            pass
+    if not lines:
+        return []
+    else:
+        return [
+            "",
+            "## Listening quality",
+            "",
+            "Per reply: the audio deltas of one response back to back, as a client "
+            "with enough buffer plays them. Omission rate (lower is better) is the "
+            "words of the response.done transcript missing from the reply's Parakeet "
+            "text, over the transcript's words, pooled over completed replies; WER "
+            "(lower is better) counts substitutions, deletions and insertions the "
+            "same way. Both include Parakeet's own errors, so they compare systems "
+            "rather than read as absolute rates. UTMOS (1-5, higher is better) "
+            "scores every reply with audio. Voice similarity (higher is better) is "
+            "100 times the cosine of a reply's WavLM speaker embedding with the "
+            "mean of the repeat's other replies. p10 is the 10th percentile over "
+            "replies. Numeric cells are mean ± sample standard deviation across "
+            "repeats where values exist; counts are a value or range.",
+            *lines,
+        ]
 
 
 def v10_unevaluated(repeat_dir: Path) -> list[str]:
@@ -355,6 +416,7 @@ def render(run_root: Path, engine: str, judge: JudgeName) -> str:
             pass
     else:
         pass
+    lines += render_listening(repeat_dirs)
     return "\n".join(lines) + "\n"
 
 
