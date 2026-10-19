@@ -6,16 +6,13 @@
 
 Install SGLang-Omni by following [Installation](../get_started/installation.md).
 
-The checkpoint contains the thinker shards and a complete `talker/` directory. The default thinker tensor parallelism is 1 on GPU 0, while the audio encoder uses GPU 0 and speech synthesis uses GPU 1. The H200 deployment uses TP2 because TP1 has not been shown to fit within the available memory.
+The checkpoint contains the thinker shards and a complete `talker/` directory. Serving needs two GPUs. `--thinker.tp_size 2` places the thinker on both visible devices. The audio encoder uses GPU 0, and speech synthesis uses GPU 1.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 sgl-omni serve \
   --model-path inclusionAI/Ming-3.0-audio-flash \
-  --thinker.tp_size 2 \
-  --thinker.gpu '[0,1]'
+  --thinker.tp_size 2
 ```
-
-The default thinker TP size is 1. The command explicitly enables TP2 with `--thinker.tp_size 2` and assigns two GPUs to the thinker with `--thinker.gpu '[0,1]'`. These arguments configure only the thinker; the audio encoder and talker retain their normal placement on GPU 0 and GPU 1.
 
 ## Transcription
 

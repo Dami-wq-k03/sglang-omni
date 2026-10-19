@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from sglang_omni.config.schema import (
     EngineArgs,
@@ -38,7 +38,6 @@ def default_stages() -> list[StageConfig]:
         EngineStageConfig(
             name="thinker",
             process="thinker",
-            gpu=0,
             factory_path=f"{PACKAGE}.stages.create_thinker_executor",
             factory=FactoryArgs(max_seq_len=8192, enable_async_decode=False),
             engine=EngineArgs(
@@ -69,6 +68,36 @@ def default_stages() -> list[StageConfig]:
 
 class Ming3AudioPipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "BailingMoeV3AudioForConditionalGeneration"
+
+    @model_validator(mode="before")
+    @classmethod
+    def place_thinker_on_visible_gpus(cls, data: object) -> object:
+        # note (zhaochenyang): StageConfig requires a GPU list when tp_size > 1.
+        # The serve flag sets only tp_size; logical ids follow visible-device order.
+        if not isinstance(data, dict):
+            return data
+        else:
+            pass
+        stages = data.get("stages")
+        if not isinstance(stages, list):
+            return data
+        else:
+            pass
+        placed_stages: list[object] = []
+        for stage in stages:
+            tp_size = stage.get("tp_size", 1) if isinstance(stage, dict) else 1
+            if (
+                isinstance(stage, dict)
+                and stage.get("name") == "thinker"
+                and stage.get("gpu") is None
+                and isinstance(tp_size, int)
+                and tp_size > 1
+            ):
+                placed_stages.append({**stage, "gpu": list(range(tp_size))})
+            else:
+                placed_stages.append(stage)
+        return {**data, "stages": placed_stages}
+
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "thinker": EngineStageConfig,
     }

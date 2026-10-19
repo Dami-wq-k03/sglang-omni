@@ -22,32 +22,37 @@ class FactoryCapture:
     infrastructure_server_args: FakeServerArgs | None = None
 
 
-def get_stage(config: Ming3AudioPipelineConfig, name: str) -> StageConfig:
+def stage_named(config: Ming3AudioPipelineConfig, name: str) -> StageConfig:
     return next(stage for stage in config.stages if stage.name == name)
 
 
-def test_default_configuration_uses_single_gpu_thinker() -> None:
+def test_default_configuration_does_not_pin_thinker_parallelism() -> None:
     config = Ming3AudioPipelineConfig(model_path="dummy")
-
-    thinker = get_stage(config, "thinker")
-
+    thinker = stage_named(config, "thinker")
     assert thinker.tp_size == 1
-    assert thinker.gpu == 0
+    assert thinker.gpu is None
+
+
+def test_thinker_tp_size_places_logical_gpus() -> None:
+    config = Ming3AudioPipelineConfig(model_path="dummy")
+    merged = ConfigManager(config).merge_config([("thinker.tp_size", "2")])
+    assert stage_named(merged, "thinker").tp_size == 2
+    assert stage_named(merged, "thinker").gpu == [0, 1]
+    assert stage_named(merged, "audio_encoder").gpu == 0
+    assert stage_named(merged, "talker").gpu == 1
 
 
 def test_cli_tp2_configuration_preserves_encoder_and_talker_placement() -> None:
     config = Ming3AudioPipelineConfig(model_path="dummy")
-    manager = ConfigManager(config)
-    cli_arguments = manager.parse_extra_args(
+    config_manager = ConfigManager(config)
+    cli_arguments = config_manager.parse_extra_args(
         ["--thinker.tp_size", "2", "--thinker.gpu", "[0,1]"]
     )
-
-    resolved = manager.merge_config(cli_arguments)
-
-    assert get_stage(resolved, "thinker").tp_size == 2
-    assert get_stage(resolved, "thinker").gpu == [0, 1]
-    assert get_stage(resolved, "audio_encoder").gpu == 0
-    assert get_stage(resolved, "talker").gpu == 1
+    merged = config_manager.merge_config(cli_arguments)
+    assert stage_named(merged, "thinker").tp_size == 2
+    assert stage_named(merged, "thinker").gpu == [0, 1]
+    assert stage_named(merged, "audio_encoder").gpu == 0
+    assert stage_named(merged, "talker").gpu == 1
 
 
 @pytest.mark.parametrize(
@@ -62,11 +67,10 @@ def test_invalid_thinker_placement_is_rejected_before_model_loading(
     cli_arguments: list[str], error_message: str
 ) -> None:
     config = Ming3AudioPipelineConfig(model_path="dummy")
-    manager = ConfigManager(config)
-    parsed_arguments = manager.parse_extra_args(cli_arguments)
-
+    config_manager = ConfigManager(config)
+    parsed_arguments = config_manager.parse_extra_args(cli_arguments)
     with pytest.raises(ValueError, match=error_message):
-        manager.merge_config(parsed_arguments)
+        config_manager.merge_config(parsed_arguments)
 
 
 def test_thinker_factory_forwards_tp_size_to_sglang(
@@ -95,7 +99,11 @@ def test_thinker_factory_forwards_tp_size_to_sglang(
             SimpleNamespace(vocab_size=32),
         )
 
-    monkeypatch.setattr(stages, "resolve_concrete_device", lambda device, gpu_id: None)
+    monkeypatch.setattr(
+        stages,
+        "resolve_concrete_device",
+        lambda device, gpu_id: SimpleNamespace(index=gpu_id),
+    )
     monkeypatch.setattr(stages, "build_sglang_server_args", build_server_args)
     monkeypatch.setattr(stages, "create_sglang_infrastructure", create_infrastructure)
     monkeypatch.setattr(
