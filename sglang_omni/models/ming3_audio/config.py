@@ -38,8 +38,7 @@ def default_stages() -> list[StageConfig]:
         EngineStageConfig(
             name="thinker",
             process="thinker",
-            gpu=[0, 1],
-            tp_size=2,
+            gpu=0,
             factory_path=f"{PACKAGE}.stages.create_thinker_executor",
             factory=FactoryArgs(max_seq_len=8192, enable_async_decode=False),
             engine=EngineArgs(
