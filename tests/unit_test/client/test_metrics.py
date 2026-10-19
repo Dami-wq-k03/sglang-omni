@@ -13,7 +13,7 @@ from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.pipeline.replicas import ReplicaTopology
 from sglang_omni.proto import CompleteMessage, StreamMessage
 from sglang_omni.proto.request import OmniRequest
-from sglang_omni.serve.metrics import RequestMetrics
+from sglang_omni.serve.request_metrics import RequestMetrics
 from tests.unit_test.fixtures.pipeline_fakes import RecordingCoordinatorControlPlane
 
 

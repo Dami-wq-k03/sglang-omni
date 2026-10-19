@@ -90,7 +90,7 @@ from sglang_omni.serve.image_response import (
     ImageGenerationResponse,
     build_image_response,
 )
-from sglang_omni.serve.metrics import MetricsMiddleware, RequestMetrics
+from sglang_omni.serve.metrics import MetricsMiddleware
 from sglang_omni.serve.openai_errors import (
     is_bad_request_error as _is_bad_request_error,
 )
@@ -125,6 +125,7 @@ from sglang_omni.serve.protocol import (
     VoiceListResponse,
     WeightsCheckerRequest,
 )
+from sglang_omni.serve.request_metrics import RequestMetrics
 from sglang_omni.serve.speech_errors import (
     SpeechAPIError,
     bad_request,

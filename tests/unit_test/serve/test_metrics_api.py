@@ -9,13 +9,13 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-import sglang_omni.serve.metrics as metrics_module
+import sglang_omni.serve.metrics_registry as metrics_module
 import sglang_omni.serve.openai_api as api_module
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateChunk, GenerateRequest
 from sglang_omni.scheduling.metrics_snapshot import MetricsAdminResponse
-from sglang_omni.serve.metrics import RequestMetrics
 from sglang_omni.serve.openai_api import create_app
+from sglang_omni.serve.request_metrics import RequestMetrics
 
 
 class MetricsClient:

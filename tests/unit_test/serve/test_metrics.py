@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import importlib
+import sys
 from collections.abc import AsyncGenerator
 
 import pytest
 from starlette.types import Message, Receive, Scope, Send
 
+import sglang_omni.serve.metrics_registry as metrics_registry
 from sglang_omni.client.types import GenerateChunk, UsageInfo
 from sglang_omni.scheduling.metrics_snapshot import MetricsAdminResponse
-from sglang_omni.serve.metrics import MetricsMiddleware, RequestMetrics
+from sglang_omni.serve.metrics import MetricsMiddleware
+from sglang_omni.serve.request_metrics import RequestMetrics
 
 
 def test_http_stream_records_only_after_final_body() -> None:
@@ -171,7 +175,7 @@ def test_invalid_cache_count_is_not_published() -> None:
     metrics = RequestMetrics("test")
     metrics.observe_finished(
         stream=False,
-        latency=1,
+        latency_s=1,
         prompt_tokens=10,
         generation_tokens=4,
         cached_tokens=11,
@@ -187,7 +191,7 @@ def test_invalid_cache_count_is_not_published() -> None:
 def test_images_do_not_publish_token_histograms() -> None:
     metrics = RequestMetrics("test")
     metrics.observe_finished(
-        stream=False, latency=1, prompt_tokens=None, generation_tokens=None
+        stream=False, latency_s=1, prompt_tokens=None, generation_tokens=None
     )
     assert (
         metrics.registry.get_sample_value(
@@ -225,7 +229,7 @@ def test_generate_keeps_latest_usage_without_summing(
     metrics = RequestMetrics("test")
     times = iter([0, 1, 1.06, 1.07, 1.08, 1.09])
     monkeypatch.setattr(
-        "sglang_omni.serve.metrics.time.perf_counter", lambda: next(times)
+        "sglang_omni.serve.request_metrics.time.perf_counter", lambda: next(times)
     )
 
     async def source() -> AsyncGenerator[GenerateChunk, None]:
@@ -539,7 +543,7 @@ def test_finished_usage_and_registry_isolation() -> None:
     metrics = RequestMetrics("test")
     other = RequestMetrics("test")
     metrics.observe_finished(
-        stream=True, latency=2, prompt_tokens=10, generation_tokens=4
+        stream=True, latency_s=2, prompt_tokens=10, generation_tokens=4
     )
     labels = {"model_name": "test", "is_streaming": "true"}
     assert metrics.registry.get_sample_value("sglang:prompt_tokens_total", labels) == 10
@@ -569,7 +573,7 @@ def test_failed_stage_does_not_serve_stale_gauges() -> None:
 def test_missing_usage_is_not_zero_usage() -> None:
     metrics = RequestMetrics("test")
     metrics.observe_finished(
-        stream=False, latency=1, prompt_tokens=None, generation_tokens=None
+        stream=False, latency_s=1, prompt_tokens=None, generation_tokens=None
     )
     labels = {"model_name": "test", "is_streaming": "false"}
     assert (
@@ -582,3 +586,29 @@ def test_missing_usage_is_not_zero_usage() -> None:
         metrics.registry.get_sample_value("sglang:generation_tokens_total", labels)
         is None
     )
+
+
+def test_request_metrics_reports_missing_optional_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        with monkeypatch.context() as isolated:
+            isolated.setitem(sys.modules, "prometheus_client", None)
+            importlib.reload(metrics_registry)
+            with pytest.raises(RuntimeError, match=r"sglang-omni\[metrics\]"):
+                RequestMetrics("test")
+    finally:
+        importlib.reload(metrics_registry)
+
+
+def test_request_metrics_preserves_transitive_import_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        with monkeypatch.context() as isolated:
+            isolated.setitem(sys.modules, "prometheus_client.core", None)
+            with pytest.raises(ModuleNotFoundError) as raised:
+                importlib.reload(metrics_registry)
+            assert raised.value.name == "prometheus_client.core"
+    finally:
+        importlib.reload(metrics_registry)
