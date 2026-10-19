@@ -57,9 +57,11 @@ def done_event(response_id: str, status: str, transcript: str) -> JsonValue:
     }
 
 
-def write_session(directory: Path, cuts: bool = False) -> Path:
-    """A recorded native session: r1 completed, r2 cancelled, r3 completed
-    without audio; r1's samples are 1000 and r2's 2000."""
+def write_session(
+    directory: Path, cuts: list[dict[str, JsonValue]] | None = None
+) -> Path:
+    """A recorded session: r1 completed, r2 cancelled, r3 completed without
+    audio; r1's samples are 1000 and r2's 2000, played back to back from 0."""
     directory.mkdir(parents=True)
     media = np.concatenate(
         [
@@ -75,24 +77,27 @@ def write_session(directory: Path, cuts: bool = False) -> Path:
             "response_id": "r1",
             "trace_line": 2,
             "media_start_sample": 0,
+            "playout_start_sample": 0,
             "samples": 42000,
         },
         {
             "response_id": "r1",
             "trace_line": 3,
             "media_start_sample": 42000,
+            "playout_start_sample": 42000,
             "samples": 42000,
         },
         {
             "response_id": "r2",
             "trace_line": 5,
             "media_start_sample": 84000,
+            "playout_start_sample": 84000,
             "samples": 36000,
         },
     ]
     playout: dict[str, JsonValue] = {"chunks": chunks}
-    if cuts:
-        playout["cuts"] = []
+    if cuts is not None:
+        playout["cuts"] = cuts
     else:
         pass
     (directory / "playout.json").write_text(json.dumps(playout))
@@ -215,17 +220,27 @@ def test_replies_are_cut_per_response_in_start_order_at_16_khz(tmp_path: Path) -
     assert len(audio) == 24000 and abs(int(np.median(audio)) - 2000) <= 1
 
 
-def test_a_trace_changed_after_the_export_or_a_cutting_capture_is_refused(
-    tmp_path: Path,
-) -> None:
+def test_a_trace_changed_after_the_export_is_refused(tmp_path: Path) -> None:
     manifests = write_manifests(tmp_path)
     trace = tmp_path / "recording" / "overlap" / "continuous.jsonl"
     trace.write_text(trace.read_text() + "\n")
     with pytest.raises(ValueError, match="changed after the reference export"):
         extract_replies(manifests, tmp_path / "listening")
-    cutting = write_session(tmp_path / "cutting", cuts=True)
-    with pytest.raises(ValueError, match="cuts replies at barge-in"):
-        listening_replies.variant_replies(cutting)
+
+
+def test_a_barge_in_cut_keeps_only_what_the_playout_played(tmp_path: Path) -> None:
+    # note (luojiaxuan): the cut after r2's delta stops playout 0.5 s into r2; a
+    # cut before a delta leaves it whole.
+    session = write_session(
+        tmp_path / "cut",
+        cuts=[
+            {"trace_line": 1, "cut_sample": 0},
+            {"trace_line": 6, "cut_sample": 84000 + 12000},
+        ],
+    )
+    first, cancelled, _ = listening_replies.variant_replies(session)
+    assert len(first["samples"]) == 84000
+    assert len(cancelled["samples"]) == 12000
 
 
 def test_transcribe_writes_each_spoken_reply_its_parakeet_text(

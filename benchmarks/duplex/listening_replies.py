@@ -3,8 +3,9 @@
 transcript the server gave it, and transcribe it with the pinned Parakeet.
 
 A reply is the audio of one response_id, its deltas back to back as a client
-with enough buffer plays them. Gaps from late deltas are left out: the serving
-report measures them as underruns.
+with enough buffer plays them, up to where the simulated playout stopped at a
+barge-in cut. Gaps from late deltas are left out: the serving report measures
+them as underruns.
 """
 
 from __future__ import annotations
@@ -76,17 +77,25 @@ def spoken_transcript(response: dict[str, JsonValue]) -> str | None:
     return "".join(transcripts) if transcripts else None
 
 
+def played_samples(
+    chunk: dict[str, JsonValue], cuts: list[dict[str, JsonValue]]
+) -> int:
+    """How much of an audio delta the simulated playout played: all of it,
+    unless the first barge-in cut received after it fell before its end."""
+    later = [cut for cut in cuts if cut["trace_line"] > chunk["trace_line"]]
+    if not later:
+        return chunk["samples"]
+    else:
+        heard = later[0]["cut_sample"] - chunk["playout_start_sample"]
+        return min(chunk["samples"], max(0, heard))
+
+
 def variant_replies(directory: Path) -> list[dict[str, JsonValue]]:
     """The replies of one recorded session in the order they started, each with
-    its PCM16 samples at the recording's output rate."""
+    the PCM16 samples it played at the recording's output rate."""
     playout = read_json(directory / "playout.json")
-    if "cuts" in playout:
-        raise ValueError(
-            f"{directory}: this capture cuts replies at barge-in; listening "
-            "metrics read native captures, whose replies play in full"
-        )
-    else:
-        pass
+    # note (luojiaxuan): only captures whose replies stop at barge-in list cuts.
+    cuts = playout["cuts"] if "cuts" in playout else []
     media, sample_rate = soundfile.read(directory / "output-media.wav", dtype="int16")
     replies: dict[str, dict[str, JsonValue]] = {}
     for chunk in playout["chunks"]:
@@ -95,7 +104,7 @@ def variant_replies(directory: Path) -> list[dict[str, JsonValue]]:
             {"first_line": chunk["trace_line"], "pieces": [], "done": None},
         )
         start = chunk["media_start_sample"]
-        reply["pieces"].append(media[start : start + chunk["samples"]])
+        reply["pieces"].append(media[start : start + played_samples(chunk, cuts)])
     with (directory / "continuous.jsonl").open(encoding="utf-8") as trace:
         for line_number, line in enumerate(trace, start=1):
             record = json.loads(line)
