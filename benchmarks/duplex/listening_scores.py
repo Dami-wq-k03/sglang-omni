@@ -37,11 +37,13 @@ SCORES_FILE = "scores.json"
 SUMMARY_FILE = "summary.json"
 VOICE_WINDOW_DIR = "voice-window"
 LOW_PERCENTILE = 10
-# note (luojiaxuan): the shortest audio UTMOS scores without a length bias: middle
-# crops of replies of 6 s or more score 0.06 below the full reply at 2 s and 0.38
-# below at 1 s. A speaker embedding depends on length at every duration measured
-# (up to 4 s), so voice similarity compares windows of exactly this length.
-SCORED_DURATION_S = 2.0
+# note (luojiaxuan): middle crops of replies of 6 s or more score within 0.07 MOS
+# of the full reply from 2 s on, and 0.38 below it at 1 s. A speaker embedding
+# depends on length at every duration measured, so voice similarity compares
+# windows of one length; on MiniCPM-o replies, original and pitch-shifted copies
+# separate by d = 2.7 with 2 s windows, 4.0 with 3 s and 5.0 with 4 s, while the
+# replies long enough to score drop from 44 of 50 at 3 s to 38 at 4 s.
+SCORED_DURATION_S = 3.0
 # note (luojiaxuan): v1.5 pools its categories into "all", as its timing table
 # does; v1.0 subsets are never pooled.
 POOLED_DATASETS = ("v1.5",)

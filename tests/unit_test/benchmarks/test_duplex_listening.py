@@ -32,9 +32,9 @@ from benchmarks.duplex.reference_v10 import MANIFEST_KIND as V10_MANIFEST_KIND
 from benchmarks.duplex.run_artifacts import file_sha256
 
 OUTPUT_RATE = 24000
-# note (luojiaxuan): a 2.5 s completed reply, a 1.5 s cancelled one, and a
+# note (luojiaxuan): a 3.5 s completed reply, a 1.5 s cancelled one, and a
 # completed response.done whose reply never sent audio.
-REPLY_SAMPLES = {"r1": 60000, "r2": 36000}
+REPLY_SAMPLES = {"r1": 84000, "r2": 36000}
 
 
 def done_event(response_id: str, status: str, transcript: str) -> JsonValue:
@@ -75,18 +75,18 @@ def write_session(directory: Path, cuts: bool = False) -> Path:
             "response_id": "r1",
             "trace_line": 2,
             "media_start_sample": 0,
-            "samples": 30000,
+            "samples": 42000,
         },
         {
             "response_id": "r1",
             "trace_line": 3,
-            "media_start_sample": 30000,
-            "samples": 30000,
+            "media_start_sample": 42000,
+            "samples": 42000,
         },
         {
             "response_id": "r2",
             "trace_line": 5,
-            "media_start_sample": 60000,
+            "media_start_sample": 84000,
             "samples": 36000,
         },
     ]
@@ -203,13 +203,13 @@ def test_replies_are_cut_per_response_in_start_order_at_16_khz(tmp_path: Path) -
     )
     assert (cancelled["status"], silent["status"]) == ("cancelled", "completed")
     assert (first["duration_s"], cancelled["duration_s"], silent["duration_s"]) == (
-        2.5,
+        3.5,
         1.5,
         0.0,
     )
     assert silent["wav"] is None
     audio, rate = soundfile.read(out / first["wav"], dtype="int16")
-    assert rate == 16000 and len(audio) == 40000
+    assert rate == 16000 and len(audio) == 56000
     assert abs(int(np.median(audio)) - 1000) <= 1
     audio, _ = soundfile.read(out / cancelled["wav"], dtype="int16")
     assert len(audio) == 24000 and abs(int(np.median(audio)) - 2000) <= 1
@@ -344,16 +344,16 @@ def test_completed_replies_are_compared_and_long_enough_replies_are_scored(
         == 1
     )
     # note (luojiaxuan): the 1.5 s reply is too short to score; the v1.5 and v1.0
-    # 2.5 s replies share one voice.
+    # 3.5 s replies share one voice.
     assert (first["utmos"], cancelled["utmos"], silent["utmos"]) == (1.0, None, None)
     assert (first["voice_similarity"], cancelled["voice_similarity"]) == (
         pytest.approx(100.0),
         None,
     )
     window, rate = soundfile.read(out / "voice-window" / first["wav"], dtype="int16")
-    assert rate == 16000 and len(window) == 32000
+    assert rate == 16000 and len(window) == 48000
     summary = json.loads((out / "summary.json").read_text())
-    assert summary["scored_duration_s"] == 2.0
+    assert summary["scored_duration_s"] == 3.0
     assert summary["models"]["utmos_sha256"] == file_sha256(
         tmp_path / "weights" / "utmos.jit"
     )
@@ -415,7 +415,7 @@ def test_aggregate_adds_a_listening_section_per_dataset(tmp_path: Path) -> None:
         (listening / "summary.json").write_text(
             json.dumps(
                 {
-                    "scored_duration_s": 2.0,
+                    "scored_duration_s": 3.0,
                     "datasets": {
                         "v1.5": {"all": {**group, "utmos_mean": utmos}},
                         **({"v1.0": {"icc_backchannel": group}} if repeat == 1 else {}),
@@ -428,7 +428,7 @@ def test_aggregate_adds_a_listening_section_per_dataset(tmp_path: Path) -> None:
     results = render(tmp_path / "run", "minicpmo", "qwen")
     section = results[results.index("## Listening quality") :]
     assert "Omission rate (lower is better)" in section
-    assert "UTMOS (1-5, higher is better) scores replies of at least 2 s" in section
+    assert "UTMOS (1-5, higher is better) scores replies of at least 3 s" in section
     assert "| all | 4 | 1 | 2 | 25.0 ± 0.0% | 50.0 ± 0.0% | 3.500 ± 0.707 |" in section
     assert "v1.0 cells come from repeat-1 only" in section
     assert (
@@ -438,7 +438,7 @@ def test_aggregate_adds_a_listening_section_per_dataset(tmp_path: Path) -> None:
 
 
 def test_aggregate_refuses_repeats_scored_with_different_floors(tmp_path: Path) -> None:
-    for repeat, floor_s in ((1, 2.0), (2, 1.0)):
+    for repeat, floor_s in ((1, 3.0), (2, 2.0)):
         listening = tmp_path / "run" / f"repeat-{repeat}" / "listening"
         listening.mkdir(parents=True)
         (listening / "summary.json").write_text(
