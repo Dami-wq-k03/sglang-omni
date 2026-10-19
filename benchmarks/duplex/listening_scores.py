@@ -4,9 +4,10 @@ consistency, each reply and pooled per dataset category.
 
 Omission compares a completed reply's Parakeet text with the transcript the
 server gave in response.done; a cancelled reply's transcript may run past the
-audio it played, so it is not compared. Voice consistency is the cosine
-similarity of a reply's speaker embedding with the mean embedding of every
-other reply of the repeat.
+audio it played, so it is not compared. UTMOS scores replies of at least
+SCORED_DURATION_S. Voice consistency is the cosine similarity of the speaker
+embedding of a reply's middle SCORED_DURATION_S with the mean embedding of the
+same window of every other such reply in the repeat.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import soundfile
 import torch
 import torch.nn.functional as F
 from jiwer import process_words
@@ -33,7 +35,13 @@ from benchmarks.metrics.utmos import UTMOSScorer, ensure_utmos_assets
 
 SCORES_FILE = "scores.json"
 SUMMARY_FILE = "summary.json"
+VOICE_WINDOW_DIR = "voice-window"
 LOW_PERCENTILE = 10
+# note (luojiaxuan): the shortest audio UTMOS scores without a length bias: middle
+# crops of replies of 6 s or more score 0.06 below the full reply at 2 s and 0.38
+# below at 1 s. A speaker embedding depends on length at every duration measured
+# (up to 4 s), so voice similarity compares windows of exactly this length.
+SCORED_DURATION_S = 2.0
 # note (luojiaxuan): v1.5 pools its categories into "all", as its timing table
 # does; v1.0 subsets are never pooled.
 POOLED_DATASETS = ("v1.5",)
@@ -71,6 +79,17 @@ def leave_one_out_similarity(embeddings: torch.Tensor) -> list[float | None]:
     return (F.cosine_similarity(unit, others, dim=-1) * 100.0).tolist()
 
 
+def write_voice_window(listening_dir: Path, wav: str) -> Path:
+    """The middle SCORED_DURATION_S of a reply, under voice-window/."""
+    audio, rate = soundfile.read(listening_dir / wav, dtype="int16")
+    length = round(SCORED_DURATION_S * rate)
+    start = (len(audio) - length) // 2
+    window = listening_dir / VOICE_WINDOW_DIR / wav
+    window.parent.mkdir(parents=True, exist_ok=True)
+    soundfile.write(window, audio[start : start + length], rate, subtype="PCM_16")
+    return window
+
+
 def score_replies(listening_dir: Path, device: str) -> list[dict[str, JsonValue]]:
     replies = read_json(listening_dir / REPLIES_FILE)["replies"]
     for reply in replies:
@@ -81,12 +100,11 @@ def score_replies(listening_dir: Path, device: str) -> list[dict[str, JsonValue]
             reply["word_errors"] = word_errors(reply["transcript"], heard)
         else:
             reply["word_errors"] = None
-    spoken = [reply for reply in replies if reply["wav"] is not None]
-    if not spoken:
+    scored = [reply for reply in replies if reply["duration_s"] >= SCORED_DURATION_S]
+    if not scored:
         return replies
     else:
         pass
-    paths = [str(listening_dir / reply["wav"]) for reply in spoken]
     utmos = UTMOSScorer(device)
     assets = ensure_speaker_similarity_assets()
     speaker = WavLMSpeakerSimilarity(
@@ -94,11 +112,16 @@ def score_replies(listening_dir: Path, device: str) -> list[dict[str, JsonValue]
         wavlm_base=assets.wavlm_base,
         device=device,
     )
-    embeddings = torch.cat([speaker.embed([path]).cpu() for path in paths])
-    for reply, path, similarity in zip(
-        spoken, paths, leave_one_out_similarity(embeddings), strict=True
+    embeddings = torch.cat(
+        [
+            speaker.embed([str(write_voice_window(listening_dir, reply["wav"]))]).cpu()
+            for reply in scored
+        ]
+    )
+    for reply, similarity in zip(
+        scored, leave_one_out_similarity(embeddings), strict=True
     ):
-        reply["utmos"] = utmos.score_batch([path])[0]
+        reply["utmos"] = utmos.score_batch([str(listening_dir / reply["wav"])])[0]
         reply["voice_similarity"] = similarity
     return replies
 
@@ -127,6 +150,10 @@ def summarize_group(replies: list[dict[str, JsonValue]]) -> dict[str, JsonValue]
     return {
         "replies": len(replies),
         "replies_with_audio": sum(reply["wav"] is not None for reply in replies),
+        "short_replies": sum(
+            reply["wav"] is not None and reply["duration_s"] < SCORED_DURATION_S
+            for reply in replies
+        ),
         "statuses": dict(sorted(statuses.items())),
         "compared_replies": len(counted),
         "reference_words": words,
@@ -183,6 +210,7 @@ def run_score(listening_dir: Path, device: str) -> None:
                 "speaker_wavlm_sha256": file_sha256(assets.wavlm_base),
             },
             "text_normalizer": "whisper.normalizers.EnglishTextNormalizer",
+            "scored_duration_s": SCORED_DURATION_S,
             "datasets": summarize(scored),
         },
     )

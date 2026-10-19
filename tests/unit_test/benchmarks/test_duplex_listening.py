@@ -32,9 +32,9 @@ from benchmarks.duplex.reference_v10 import MANIFEST_KIND as V10_MANIFEST_KIND
 from benchmarks.duplex.run_artifacts import file_sha256
 
 OUTPUT_RATE = 24000
-# note (luojiaxuan): two replies with audio, one cancelled, and a completed
-# response.done whose reply never sent audio.
-REPLY_SAMPLES = {"r1": 2400, "r2": 4800}
+# note (luojiaxuan): a 2.5 s completed reply, a 1.5 s cancelled one, and a
+# completed response.done whose reply never sent audio.
+REPLY_SAMPLES = {"r1": 60000, "r2": 36000}
 
 
 def done_event(response_id: str, status: str, transcript: str) -> JsonValue:
@@ -75,19 +75,19 @@ def write_session(directory: Path, cuts: bool = False) -> Path:
             "response_id": "r1",
             "trace_line": 2,
             "media_start_sample": 0,
-            "samples": 1200,
+            "samples": 30000,
         },
         {
             "response_id": "r1",
             "trace_line": 3,
-            "media_start_sample": 1200,
-            "samples": 1200,
+            "media_start_sample": 30000,
+            "samples": 30000,
         },
         {
             "response_id": "r2",
             "trace_line": 5,
-            "media_start_sample": 2400,
-            "samples": 4800,
+            "media_start_sample": 60000,
+            "samples": 36000,
         },
     ]
     playout: dict[str, JsonValue] = {"chunks": chunks}
@@ -203,16 +203,16 @@ def test_replies_are_cut_per_response_in_start_order_at_16_khz(tmp_path: Path) -
     )
     assert (cancelled["status"], silent["status"]) == ("cancelled", "completed")
     assert (first["duration_s"], cancelled["duration_s"], silent["duration_s"]) == (
-        0.1,
-        0.2,
+        2.5,
+        1.5,
         0.0,
     )
     assert silent["wav"] is None
     audio, rate = soundfile.read(out / first["wav"], dtype="int16")
-    assert rate == 16000 and len(audio) == 1600
+    assert rate == 16000 and len(audio) == 40000
     assert abs(int(np.median(audio)) - 1000) <= 1
     audio, _ = soundfile.read(out / cancelled["wav"], dtype="int16")
-    assert len(audio) == 3200 and abs(int(np.median(audio)) - 2000) <= 1
+    assert len(audio) == 24000 and abs(int(np.median(audio)) - 2000) <= 1
 
 
 def test_a_trace_changed_after_the_export_or_a_cutting_capture_is_refused(
@@ -313,7 +313,7 @@ def stub_models(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     )
 
 
-def test_completed_replies_are_compared_and_every_spoken_reply_is_scored(
+def test_completed_replies_are_compared_and_long_enough_replies_are_scored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manifests = write_manifests(tmp_path)
@@ -343,9 +343,17 @@ def test_completed_replies_are_compared_and_every_spoken_reply_is_scored(
         == silent["word_errors"]["reference_words"]
         == 1
     )
-    assert (first["utmos"], cancelled["utmos"], silent["utmos"]) == (1.0, 2.0, None)
-    assert silent["voice_similarity"] is None
+    # note (luojiaxuan): the 1.5 s reply is too short to score; the v1.5 and v1.0
+    # 2.5 s replies share one voice.
+    assert (first["utmos"], cancelled["utmos"], silent["utmos"]) == (1.0, None, None)
+    assert (first["voice_similarity"], cancelled["voice_similarity"]) == (
+        pytest.approx(100.0),
+        None,
+    )
+    window, rate = soundfile.read(out / "voice-window" / first["wav"], dtype="int16")
+    assert rate == 16000 and len(window) == 32000
     summary = json.loads((out / "summary.json").read_text())
+    assert summary["scored_duration_s"] == 2.0
     assert summary["models"]["utmos_sha256"] == file_sha256(
         tmp_path / "weights" / "utmos.jit"
     )
@@ -353,9 +361,10 @@ def test_completed_replies_are_compared_and_every_spoken_reply_is_scored(
     assert interruption == summary["datasets"]["v1.5"]["all"]
     assert interruption["statuses"] == {"cancelled": 1, "completed": 2}
     assert interruption["compared_replies"] == 2
+    assert interruption["short_replies"] == 1
     assert interruption["omission_rate"] == pytest.approx(2 / 4)
     assert interruption["word_error_rate"] == pytest.approx(2 / 4)
-    assert interruption["utmos_mean"] == pytest.approx(1.5)
+    assert interruption["utmos_mean"] == pytest.approx(1.0)
     assert "all" not in summary["datasets"]["v1.0"]
 
 
@@ -366,6 +375,7 @@ def test_summary_counts_replies_that_never_finished_and_takes_low_percentiles() 
             "category": category,
             "status": status,
             "wav": None if utmos is None else "x.wav",
+            "duration_s": 0.0 if utmos is None else 3.0,
             "utmos": utmos,
             "voice_similarity": None,
             "word_errors": None,
@@ -390,6 +400,7 @@ def test_summary_counts_replies_that_never_finished_and_takes_low_percentiles() 
 def test_aggregate_adds_a_listening_section_per_dataset(tmp_path: Path) -> None:
     group = {
         "replies": 4,
+        "short_replies": 1,
         "compared_replies": 2,
         "omission_rate": 0.25,
         "word_error_rate": 0.5,
@@ -404,10 +415,11 @@ def test_aggregate_adds_a_listening_section_per_dataset(tmp_path: Path) -> None:
         (listening / "summary.json").write_text(
             json.dumps(
                 {
+                    "scored_duration_s": 2.0,
                     "datasets": {
                         "v1.5": {"all": {**group, "utmos_mean": utmos}},
                         **({"v1.0": {"icc_backchannel": group}} if repeat == 1 else {}),
-                    }
+                    },
                 }
             )
         )
@@ -416,9 +428,23 @@ def test_aggregate_adds_a_listening_section_per_dataset(tmp_path: Path) -> None:
     results = render(tmp_path / "run", "minicpmo", "qwen")
     section = results[results.index("## Listening quality") :]
     assert "Omission rate (lower is better)" in section
-    assert "| all | 4 | 2 | 25.0 ± 0.0% | 50.0 ± 0.0% | 3.500 ± 0.707 |" in section
+    assert "UTMOS (1-5, higher is better) scores replies of at least 2 s" in section
+    assert "| all | 4 | 1 | 2 | 25.0 ± 0.0% | 50.0 ± 0.0% | 3.500 ± 0.707 |" in section
     assert "v1.0 cells come from repeat-1 only" in section
     assert (
-        "| icc_backchannel | 4 | 2 | 25.0% | 50.0% | 3.500 | 2.000 | 80.000 | 60.000 |"
+        "| icc_backchannel | 4 | 1 | 2 | 25.0% | 50.0% | 3.500 | 2.000 | 80.000 | 60.000 |"
         in section
     )
+
+
+def test_aggregate_refuses_repeats_scored_with_different_floors(tmp_path: Path) -> None:
+    for repeat, floor_s in ((1, 2.0), (2, 1.0)):
+        listening = tmp_path / "run" / f"repeat-{repeat}" / "listening"
+        listening.mkdir(parents=True)
+        (listening / "summary.json").write_text(
+            json.dumps({"scored_duration_s": floor_s, "datasets": {}})
+        )
+        (listening.parent / "v10").mkdir()
+        (listening.parent / "v10" / "sample-ids.txt").write_text("icc_backchannel/1\n")
+    with pytest.raises(SystemExit, match="different shortest scored durations"):
+        render(tmp_path / "run", "minicpmo", "qwen")

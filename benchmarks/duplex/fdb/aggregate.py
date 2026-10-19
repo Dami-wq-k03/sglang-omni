@@ -7,6 +7,8 @@ from __future__ import annotations
 import statistics
 from pathlib import Path
 
+from pydantic import JsonValue
+
 from benchmarks.duplex.fdb.common import (
     ENGINE_LABEL,
     LISTENING_DIR,
@@ -72,6 +74,7 @@ V10_COLUMNS = (
 )
 LISTENING_COLUMNS = (
     ("replies", "Replies", "count"),
+    ("short_replies", "Short replies", "count"),
     ("compared_replies", "Compared replies", "count"),
     ("omission_rate", "Omission rate", "percent"),
     ("word_error_rate", "WER", "percent"),
@@ -178,22 +181,58 @@ def v10_metrics(repeat_dir: Path) -> RepeatMetrics:
     return metrics
 
 
-def listening_metrics(repeat_dir: Path, dataset: str) -> RepeatMetrics:
+def listening_metrics(
+    summary: dict[str, JsonValue] | None, dataset: str
+) -> RepeatMetrics:
     """One dataset's per-category listening pools; empty when the repeat has no
     listening summary or did not select that dataset."""
-    summary_path = repeat_dir / LISTENING_DIR / "summary.json"
-    if not summary_path.is_file():
+    if summary is None or dataset not in summary["datasets"]:
         return {}
     else:
-        pass
-    datasets = read_json(summary_path)["datasets"]
-    return datasets[dataset] if dataset in datasets else {}
+        return summary["datasets"][dataset]
 
 
 def render_listening(repeat_dirs: list[Path]) -> list[str]:
-    lines = []
+    summaries = [
+        (
+            read_json(path / LISTENING_DIR / "summary.json")
+            if (path / LISTENING_DIR / "summary.json").is_file()
+            else None
+        )
+        for path in repeat_dirs
+    ]
+    floors = {summary["scored_duration_s"] for summary in summaries if summary}
+    if not floors:
+        return []
+    elif len(floors) > 1:
+        raise SystemExit(
+            "ERROR: the repeats' listening summaries use different shortest scored "
+            f"durations {sorted(floors)}; rerun `asr` on the older repeats."
+        )
+    else:
+        pass
+    (floor_s,) = floors
+    lines = [
+        "",
+        "## Listening quality",
+        "",
+        "Per reply: the audio deltas of one response back to back, as a client "
+        "with enough buffer plays them. Omission rate (lower is better) is the "
+        "words of the response.done transcript missing from the reply's Parakeet "
+        "text, over the transcript's words, pooled over completed replies; WER "
+        "(lower is better) counts substitutions, deletions and insertions the "
+        "same way. Both include Parakeet's own errors, so they compare systems "
+        "rather than read as absolute rates. UTMOS (1-5, higher is better) "
+        f"scores replies of at least {floor_s:g} s; Short replies counts the "
+        "shorter ones, which get no UTMOS or voice score. Voice similarity "
+        "(higher is better) is 100 times the cosine of the WavLM speaker "
+        f"embedding of a reply's middle {floor_s:g} s with the mean embedding of "
+        "the same window of the repeat's other replies. p10 is the 10th "
+        "percentile over replies. Numeric cells are mean ± sample standard "
+        "deviation across repeats where values exist; counts are a value or range.",
+    ]
     for dataset, categories in (("v1.5", CATEGORIES), ("v1.0", V10_SUBSETS)):
-        per_repeat = [listening_metrics(path, dataset) for path in repeat_dirs]
+        per_repeat = [listening_metrics(summary, dataset) for summary in summaries]
         if any(per_repeat):
             note = coverage_note(dataset, repeat_dirs, per_repeat).strip()
             lines += [
@@ -205,27 +244,7 @@ def render_listening(repeat_dirs: list[Path]) -> list[str]:
             ]
         else:
             pass
-    if not lines:
-        return []
-    else:
-        return [
-            "",
-            "## Listening quality",
-            "",
-            "Per reply: the audio deltas of one response back to back, as a client "
-            "with enough buffer plays them. Omission rate (lower is better) is the "
-            "words of the response.done transcript missing from the reply's Parakeet "
-            "text, over the transcript's words, pooled over completed replies; WER "
-            "(lower is better) counts substitutions, deletions and insertions the "
-            "same way. Both include Parakeet's own errors, so they compare systems "
-            "rather than read as absolute rates. UTMOS (1-5, higher is better) "
-            "scores every reply with audio. Voice similarity (higher is better) is "
-            "100 times the cosine of a reply's WavLM speaker embedding with the "
-            "mean of the repeat's other replies. p10 is the 10th percentile over "
-            "replies. Numeric cells are mean ± sample standard deviation across "
-            "repeats where values exist; counts are a value or range.",
-            *lines,
-        ]
+    return lines
 
 
 def v10_unevaluated(repeat_dir: Path) -> list[str]:
